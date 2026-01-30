@@ -10,6 +10,7 @@ from .models import AutomationConfig
 from .excel_handler import load_expected_prices, save_results
 from .browser_automation import PanagoAutomation
 from .comparison import compare_prices
+from .config_loader import load_settings
 
 
 def configure_logging(verbose: bool = False) -> None:
@@ -90,6 +91,31 @@ Examples:
         help="Path to locations.yaml configuration file",
     )
     parser.add_argument(
+        "--settings",
+        "-s",
+        type=Path,
+        default=Path("config/settings.yaml"),
+        help="Path to settings.yaml configuration file",
+    )
+    parser.add_argument(
+        "--env",
+        "-e",
+        choices=["qa", "production"],
+        default="qa",
+        help="Environment to run against (default: qa)",
+    )
+    parser.add_argument(
+        "--safe-mode",
+        action="store_true",
+        default=True,
+        help="Enable safe mode with conservative rate limiting (default: enabled)",
+    )
+    parser.add_argument(
+        "--no-safe-mode",
+        action="store_true",
+        help="Disable safe mode (use with caution on production)",
+    )
+    parser.add_argument(
         "--headless",
         action="store_true",
         default=True,
@@ -144,16 +170,56 @@ def main() -> int:
 
     logger = structlog.get_logger()
 
+    # Load settings from YAML
+    settings = {}
+    if args.settings.exists():
+        settings = load_settings(args.settings)
+
+    # Determine environment settings
+    env_name = args.env
+    env_settings = settings.get("environments", {}).get(env_name, {})
+    base_url = env_settings.get("base_url", "https://www.panago.com")
+
+    # Determine if safe mode is enabled
+    safe_mode = args.safe_mode and not args.no_safe_mode
+    if safe_mode:
+        safe_settings = settings.get("safe_mode_settings", {})
+        max_concurrent = safe_settings.get("max_concurrent", 1)
+        min_delay = safe_settings.get("min_delay_ms", 5000)
+        max_delay = safe_settings.get("max_delay_ms", 10000)
+    else:
+        max_concurrent = env_settings.get("max_concurrent", args.max_concurrent)
+        min_delay = env_settings.get("min_delay_ms", 3000)
+        max_delay = env_settings.get("max_delay_ms", 6000)
+
     config = AutomationConfig(
         input_file=args.input,
         output_dir=args.output,
         headless=not args.visible,
-        max_concurrent=args.max_concurrent,
+        max_concurrent=max_concurrent,
         timeout_ms=args.timeout,
     )
 
     try:
-        logger.info("starting_validation", input_file=str(config.input_file))
+        logger.info(
+            "starting_validation",
+            input_file=str(config.input_file),
+            environment=env_name,
+            base_url=base_url,
+            safe_mode=safe_mode,
+            max_concurrent=max_concurrent,
+            delay_range=f"{min_delay}-{max_delay}ms",
+        )
+
+        print(f"\n{'=' * 60}")
+        print(f"PANAGO PRICING VALIDATION")
+        print(f"{'=' * 60}")
+        print(f"Environment: {env_name.upper()}")
+        print(f"Base URL: {base_url}")
+        print(f"Safe Mode: {'ENABLED' if safe_mode else 'DISABLED'}")
+        print(f"Max Concurrent: {max_concurrent}")
+        print(f"Delay Range: {min_delay/1000:.1f}s - {max_delay/1000:.1f}s")
+        print(f"{'=' * 60}\n")
 
         # Load expected prices
         expected_prices = load_expected_prices(config.input_file)
@@ -172,7 +238,13 @@ def main() -> int:
             )
 
         # Run browser automation
-        automation = PanagoAutomation(config, args.config)
+        automation = PanagoAutomation(
+            config,
+            args.config,
+            base_url=base_url,
+            min_delay_ms=min_delay,
+            max_delay_ms=max_delay,
+        )
         actual_prices = automation.run_price_collection()
         logger.info("collected_actual_prices", count=len(actual_prices))
 

@@ -79,15 +79,27 @@ class PanagoAutomation:
         "loading_spinner": ".loading, .spinner, [class*='loading']",
     }
 
-    def __init__(self, config: AutomationConfig, locations_path: Optional[Path] = None) -> None:
+    def __init__(
+        self,
+        config: AutomationConfig,
+        locations_path: Optional[Path] = None,
+        base_url: str = "https://www.panago.com",
+        min_delay_ms: int = 3000,
+        max_delay_ms: int = 6000,
+    ) -> None:
         """Initialize the automation engine.
 
         Args:
             config: Automation configuration settings.
             locations_path: Path to locations YAML file (optional).
+            base_url: Base URL for the target environment (QA or Production).
+            min_delay_ms: Minimum delay between actions in milliseconds.
+            max_delay_ms: Maximum delay between actions in milliseconds.
         """
         self.config = config
-        self.base_url = "https://www.panago.com"
+        self.base_url = base_url
+        self.min_delay_ms = min_delay_ms
+        self.max_delay_ms = max_delay_ms
         self._semaphore: Optional[asyncio.Semaphore] = None
         self._locations_path = locations_path
         self._locations: list[LocationConfig] = []
@@ -238,6 +250,8 @@ class PanagoAutomation:
     ) -> list[PriceRecord]:
         """Collect all product prices for a single location with retry.
 
+        Includes comprehensive rate limiting to minimize site impact.
+
         Args:
             page: Playwright page instance.
             location: Location to collect prices for.
@@ -249,28 +263,50 @@ class PanagoAutomation:
             "collecting_prices",
             store=location.store_name,
             province=location.province,
+            base_url=self.base_url,
         )
 
+        # Initial delay before starting
+        await self._wait_with_jitter()
+
         await page.goto(self.base_url, wait_until="domcontentloaded")
+
+        # Delay after page load
+        await self._wait_with_jitter()
 
         # Select location
         await self._select_location(page, location.address)
 
-        # Add jitter delay to appear human-like
+        # Delay after location selection
         await self._wait_with_jitter()
 
         # Collect prices from all categories
         prices: list[PriceRecord] = []
+        total_categories = len(self.CATEGORIES)
 
-        for category in self.CATEGORIES:
+        for idx, category in enumerate(self.CATEGORIES, 1):
             try:
+                logger.info(
+                    "scraping_category",
+                    category=category,
+                    progress=f"{idx}/{total_categories}",
+                    store=location.store_name,
+                )
+
                 category_prices = await self._scrape_category(
                     page, category, location
                 )
                 prices.extend(category_prices)
 
-                # Add delay between categories
-                await self._wait_with_jitter(min_ms=1000, max_ms=2000)
+                logger.info(
+                    "category_complete",
+                    category=category,
+                    products_found=len(category_prices),
+                )
+
+                # Delay between categories (use full configured delay)
+                if idx < total_categories:
+                    await self._wait_with_jitter()
 
             except Exception as e:
                 logger.warning(
@@ -279,6 +315,8 @@ class PanagoAutomation:
                     store=location.store_name,
                     error=str(e),
                 )
+                # Still wait even on failure to maintain rate limiting
+                await self._wait_with_jitter()
 
         logger.info(
             "collected_location",
@@ -343,6 +381,8 @@ class PanagoAutomation:
     ) -> list[PriceRecord]:
         """Scrape all products and prices from a category.
 
+        Includes delays to minimize site impact.
+
         Args:
             page: Playwright page instance.
             category: Category name to scrape.
@@ -354,6 +394,9 @@ class PanagoAutomation:
         # Navigate directly to category URL (more reliable than clicking)
         category_url = self.CATEGORY_URLS.get(category, f"/menu/{category}")
         await page.goto(f"{self.base_url}{category_url}", wait_until="networkidle")
+
+        # Delay after page load to let content settle and reduce server load
+        await asyncio.sleep(random.uniform(1, 2))
 
         products = page.locator(self.SELECTORS["product_card"])
         count = await products.count()
@@ -410,13 +453,18 @@ class PanagoAutomation:
         return Decimal("0")
 
     async def _wait_with_jitter(
-        self, min_ms: int = 2000, max_ms: int = 5000
+        self, min_ms: Optional[int] = None, max_ms: Optional[int] = None
     ) -> None:
-        """Wait with random jitter to appear human-like.
+        """Wait with random jitter to appear human-like and reduce site impact.
+
+        Uses configured delays by default, which respect safe mode settings.
 
         Args:
-            min_ms: Minimum wait time in milliseconds.
-            max_ms: Maximum wait time in milliseconds.
+            min_ms: Minimum wait time in milliseconds (default: use configured).
+            max_ms: Maximum wait time in milliseconds (default: use configured).
         """
-        delay = random.uniform(min_ms, max_ms) / 1000
+        min_delay = min_ms if min_ms is not None else self.min_delay_ms
+        max_delay = max_ms if max_ms is not None else self.max_delay_ms
+        delay = random.uniform(min_delay, max_delay) / 1000
+        logger.debug("waiting", delay_seconds=f"{delay:.1f}")
         await asyncio.sleep(delay)

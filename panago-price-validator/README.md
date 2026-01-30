@@ -19,14 +19,47 @@ playwright install chromium
 ## Quick Start
 
 ```sh
-# Run validation with your pricing spreadsheet
-python -m src.main -i input/expected_prices.xlsx
+# Run against QA environment (default, recommended)
+python -m src.main -i input/expected_prices.xlsx --env qa
+
+# Run against Production (uses extra-safe slow mode)
+python -m src.main -i input/expected_prices.xlsx --env production
 
 # Run with visible browser for debugging
-python -m src.main -i input/expected_prices.xlsx --visible
+python -m src.main -i input/expected_prices.xlsx --env qa --visible
 
 # Test single province
-python -m src.main -i input/expected_prices.xlsx --province BC
+python -m src.main -i input/expected_prices.xlsx --env qa --province BC
+```
+
+## Environment Configuration
+
+The tool supports multiple environments with different base URLs and rate limiting:
+
+| Environment | Base URL | Max Concurrent | Delay Range |
+|-------------|----------|----------------|-------------|
+| **qa** (default) | https://qa.panago.com | 3 | 2-4 seconds |
+| **production** | https://www.panago.com | 1 | 5-10 seconds |
+
+### Safe Mode (Enabled by Default)
+
+Safe mode enforces conservative settings to minimize site impact:
+- **1 browser** at a time
+- **5-10 second delays** between actions
+- **8 second delays** between category navigation
+
+To disable safe mode (use with caution):
+```sh
+python -m src.main -i input/expected_prices.xlsx --env qa --no-safe-mode
+```
+
+### Custom Environment URLs
+
+Edit `config/settings.yaml` to change the QA URL:
+```yaml
+environments:
+  qa:
+    base_url: "https://your-qa-site.panago.com"
 ```
 
 ## Input Format
@@ -75,10 +108,14 @@ Edit `config/settings.yaml` to adjust timeouts, parallelism, and selectors.
 |--------|-------------|---------|
 | `-i, --input` | Path to expected prices Excel file | Required |
 | `-o, --output` | Output directory | ./output |
+| `-e, --env` | Environment: `qa` or `production` | qa |
+| `--safe-mode` | Enable conservative rate limiting | Enabled |
+| `--no-safe-mode` | Disable safe mode (faster, use with caution) | - |
 | `-c, --config` | Path to locations.yaml | config/locations.yaml |
+| `-s, --settings` | Path to settings.yaml | config/settings.yaml |
 | `--visible` | Show browser window | Hidden |
 | `--province` | Test single province only | All |
-| `--max-concurrent` | Parallel browser contexts | 5 |
+| `--max-concurrent` | Parallel browser contexts | 1 (safe mode) |
 | `--timeout` | Page timeout (ms) | 30000 |
 | `--tolerance` | Price tolerance ($) | 0.01 |
 | `-v, --verbose` | Debug logging | Off |

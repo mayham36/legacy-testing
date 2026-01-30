@@ -1,31 +1,76 @@
 # Automation Settings
 # Update these based on testing and site behavior
 
-# Timeouts (in milliseconds)
+# =============================================================================
+# ENVIRONMENT CONFIGURATION
+# =============================================================================
+# Set the active environment: "qa" or "production"
+# Command line --env flag overrides this setting
+active_environment: "qa"
+
+environments:
+  qa:
+    base_url: "https://qa.panago.com"
+    # QA can run slightly faster since it's not customer-facing
+    min_delay_ms: 2000
+    max_delay_ms: 4000
+    max_concurrent: 3
+
+  production:
+    base_url: "https://www.panago.com"
+    # Production runs SLOW to minimize impact
+    min_delay_ms: 5000
+    max_delay_ms: 10000
+    max_concurrent: 1  # Only 1 browser at a time on production
+
+# =============================================================================
+# SAFE MODE (recommended for production)
+# =============================================================================
+# When enabled, enforces conservative settings regardless of other config
+safe_mode: true
+safe_mode_settings:
+  max_concurrent: 1           # Single browser only
+  min_delay_ms: 5000          # 5 second minimum between actions
+  max_delay_ms: 10000         # Up to 10 seconds random delay
+  category_delay_ms: 8000     # 8 seconds between categories
+  request_delay_ms: 3000      # 3 seconds between page loads
+
+# =============================================================================
+# TIMEOUTS
+# =============================================================================
 timeout_ms: 30000
 page_load_timeout_ms: 60000
 
-# Browser settings
+# =============================================================================
+# BROWSER SETTINGS
+# =============================================================================
 headless: true
 viewport_width: 1280
 viewport_height: 720
 locale: "en-CA"
 
-# Parallelism
-max_concurrent: 5  # Number of simultaneous browser contexts
-# Higher values = faster, but more memory and may trigger rate limiting
-# Recommended: 5 for normal runs, 8 for fast validation
+# =============================================================================
+# PARALLELISM (overridden by environment and safe_mode)
+# =============================================================================
+max_concurrent: 3  # Default - environments override this
 
-# Retry logic
+# =============================================================================
+# RETRY LOGIC
+# =============================================================================
 retry_attempts: 3
 base_delay_ms: 1000
 
-# Rate limiting - delays between actions to avoid detection
-min_delay_ms: 2000  # Minimum delay between requests
-max_delay_ms: 5000  # Maximum delay (actual is random between min and max)
-category_delay_ms: 1500  # Delay between category navigations
+# =============================================================================
+# RATE LIMITING (overridden by environment and safe_mode)
+# =============================================================================
+min_delay_ms: 3000
+max_delay_ms: 6000
+category_delay_ms: 5000
+request_delay_ms: 2000
 
-# Price comparison
+# =============================================================================
+# PRICE COMPARISON
+# =============================================================================
 tolerance_dollars: 0.01  # Maximum acceptable price difference
 
 # DOM Selectors
