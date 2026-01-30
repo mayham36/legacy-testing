@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  validator:
+    build: .
+    volumes:
+      # Mount input/output directories for easy access
+      - ./input:/app/input
+      - ./output:/app/output
+      - ./config:/app/config
+    environment:
+      - PYTHONUNBUFFERED=1
+    # Default: run against QA with safe mode
+    command: ["-i", "input/expected_prices.xlsx", "--env", "qa"]
+
+  # Convenience service for running against production
+  validator-production:
+    build: .
+    volumes:
+      - ./input:/app/input
+      - ./output:/app/output
+      - ./config:/app/config
+    environment:
+      - PYTHONUNBUFFERED=1
+    command: ["-i", "input/expected_prices.xlsx", "--env", "production"]
+    profiles:
+      - production
+
+  # Convenience service for running a single province
+  validator-bc-only:
+    build: .
+    volumes:
+      - ./input:/app/input
+      - ./output:/app/output
+      - ./config:/app/config
+    environment:
+      - PYTHONUNBUFFERED=1
+    command: ["-i", "input/expected_prices.xlsx", "--env", "qa", "--province", "BC"]
+    profiles:
+      - bc-only
