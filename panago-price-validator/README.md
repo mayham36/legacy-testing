@@ -38,7 +38,7 @@ The tool supports multiple environments with different base URLs and rate limiti
 
 | Environment | Base URL | Max Concurrent | Delay Range |
 |-------------|----------|----------------|-------------|
-| **qa** (default) | https://qa.panago.com | 3 | 2-4 seconds |
+| **qa** (default) | https://panagostaging.wpengine.com | 3 | 2-4 seconds |
 | **production** | https://www.panago.com | 1 | 5-10 seconds |
 
 ### Safe Mode (Enabled by Default)

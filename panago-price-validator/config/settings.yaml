@@ -10,7 +10,7 @@ active_environment: "qa"
 
 environments:
   qa:
-    base_url: "https://qa.panago.com"
+    base_url: "https://panagostaging.wpengine.com"
     # QA can run slightly faster since it's not customer-facing
     min_delay_ms: 2000
     max_delay_ms: 4000
