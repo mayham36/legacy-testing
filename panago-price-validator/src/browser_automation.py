@@ -45,15 +45,17 @@ class PanagoAutomation:
     ]
 
     # Product categories to scrape - matches panago.com URL structure
-    CATEGORIES = ["pizzas", "salads", "sides", "dips", "dessert", "beverages"]
+    CATEGORIES = ["pizzas", "salads", "wings", "breadstuff", "dips", "dessert", "beverages"]
 
     # Menu URL paths for each category
+    # Note: /menu/pizzas may redirect, so we use a subcategory
     CATEGORY_URLS = {
-        "pizzas": "/menu/pizzas",
+        "pizzas": "/menu/pizzas/meat",  # Use meat pizzas as main pizza page
         "salads": "/menu/salads",
-        "sides": "/menu/sides",
+        "wings": "/menu/wings",
+        "breadstuff": "/menu/breadstuff",
         "dips": "/menu/dips",
-        "dessert": "/menu/dessert",  # Note: singular on panago.com
+        "dessert": "/menu/dessert",
         "beverages": "/menu/beverages",
     }
 
@@ -325,56 +327,85 @@ class PanagoAutomation:
         )
         return prices
 
-    async def _select_location(self, page: Page, address: str) -> None:
+    async def _select_location(self, page: Page, city: str) -> None:
         """Handle city selection via the React Autosuggest modal.
 
         The Panago website uses a city picker modal that auto-detects location.
-        We need to:
+        Flow:
         1. Click the location trigger to open the modal
         2. Clear and type the city name in the autosuggest input
-        3. Wait for and select the first suggestion
+        3. Wait for and click the first suggestion
         4. Click "Save City" button
 
         Args:
             page: Playwright page instance.
-            address: City/address string to enter (e.g., "Vancouver, BC").
+            city: City name to enter (e.g., "Vancouver").
         """
-        # Click location trigger to open the city picker modal
+        logger.info("selecting_location", city=city)
+
+        # Step 1: Click location trigger to open the city picker modal
         try:
-            await page.click(self.SELECTORS["location_trigger"])
+            trigger = page.locator(self.SELECTORS["location_trigger"])
+            if await trigger.is_visible():
+                await trigger.click()
+                logger.debug("clicked_location_trigger")
+                await asyncio.sleep(1)
+        except Exception as e:
+            logger.debug("location_trigger_click_skipped", error=str(e))
+
+        # Step 2: Wait for modal and find city input
+        try:
             await page.wait_for_selector(
-                self.SELECTORS["location_panel"],
+                self.SELECTORS["city_input"],
                 state="visible",
                 timeout=5000,
             )
         except Exception:
-            # Modal might already be visible or trigger is different
-            logger.debug("location_trigger_click_skipped")
+            logger.warning("city_input_not_visible")
 
-        # Find and fill the city input
+        # Step 3: Clear and type the city name
         city_input = page.locator(self.SELECTORS["city_input"])
         await city_input.click()
-        await city_input.fill("")  # Clear existing value
-        await city_input.fill(address)
+        await asyncio.sleep(0.5)
 
-        # Wait for autocomplete suggestions to appear
-        await asyncio.sleep(1)  # Brief pause for suggestions to load
+        # Triple-click to select all, then type new value
+        await city_input.click(click_count=3)
+        await asyncio.sleep(0.3)
+        await page.keyboard.type(city, delay=50)  # Type slowly like a human
+        logger.debug("typed_city", city=city)
 
-        # Try to click a suggestion if available
+        # Step 4: Wait for autocomplete suggestions
+        await asyncio.sleep(1.5)  # Wait for suggestions to appear
+
+        # Step 5: Click the first suggestion
         try:
+            suggestion_selector = self.SELECTORS["autocomplete_suggestion"]
             await page.wait_for_selector(
-                self.SELECTORS["autocomplete_suggestion"],
+                suggestion_selector,
                 state="visible",
-                timeout=3000,
+                timeout=5000,
             )
-            await page.click(f"{self.SELECTORS['autocomplete_suggestion']} >> nth=0")
-        except Exception:
-            # No suggestions appeared, city might be exact match
-            logger.debug("no_autocomplete_suggestions", city=address)
+            first_suggestion = page.locator(suggestion_selector).first
+            suggestion_text = await first_suggestion.text_content()
+            logger.debug("clicking_suggestion", suggestion=suggestion_text)
+            await first_suggestion.click()
+            await asyncio.sleep(1)
+        except Exception as e:
+            logger.warning("no_suggestions_found", error=str(e))
 
-        # Click Save City button
-        await page.click(self.SELECTORS["save_city_button"])
+        # Step 6: Click Save City button
+        try:
+            save_button = page.locator(self.SELECTORS["save_city_button"])
+            if await save_button.is_visible():
+                await save_button.click()
+                logger.debug("clicked_save_city")
+                await asyncio.sleep(2)
+        except Exception as e:
+            logger.warning("save_button_not_found", error=str(e))
+
+        # Wait for page to update
         await page.wait_for_load_state("networkidle")
+        logger.info("location_selected", city=city)
 
     async def _scrape_category(
         self, page: Page, category: str, location: LocationConfig
@@ -393,10 +424,17 @@ class PanagoAutomation:
         """
         # Navigate directly to category URL (more reliable than clicking)
         category_url = self.CATEGORY_URLS.get(category, f"/menu/{category}")
-        await page.goto(f"{self.base_url}{category_url}", wait_until="networkidle")
+        try:
+            await page.goto(
+                f"{self.base_url}{category_url}",
+                wait_until="domcontentloaded",
+                timeout=60000,  # 60 second timeout for slow staging site
+            )
+        except Exception as e:
+            logger.warning("page_load_slow", url=category_url, error=str(e))
 
-        # Delay after page load to let content settle and reduce server load
-        await asyncio.sleep(random.uniform(1, 2))
+        # Wait for page content to load
+        await asyncio.sleep(3)  # Give React time to render
 
         products = page.locator(self.SELECTORS["product_card"])
         count = await products.count()

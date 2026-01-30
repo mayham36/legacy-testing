@@ -88,7 +88,8 @@ Examples:
         "--config",
         "-c",
         type=Path,
-        help="Path to locations.yaml configuration file",
+        default=Path("config/locations.yaml"),
+        help="Path to locations.yaml configuration file (default: config/locations.yaml)",
     )
     parser.add_argument(
         "--settings",

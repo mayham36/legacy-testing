@@ -1,58 +1,57 @@
 # Test cities for each province
-# The Panago website uses a city picker (React Autosuggest), not full addresses
-# Enter city names in the format the site expects (e.g., "Vancouver, BC")
+# The Panago website uses a city picker - enter just the city name (no province)
 
 provinces:
   BC:
-    - city: "Vancouver, BC"
+    - city: "Vancouver"
       store_name: "Vancouver"
-    - city: "Victoria, BC"
+    - city: "Victoria"
       store_name: "Victoria"
-    - city: "Surrey, BC"
+    - city: "Surrey"
       store_name: "Surrey"
 
   AB:
-    - city: "Calgary, AB"
+    - city: "Calgary"
       store_name: "Calgary"
-    - city: "Edmonton, AB"
+    - city: "Edmonton"
       store_name: "Edmonton"
 
   SK:
-    - city: "Saskatoon, SK"
+    - city: "Saskatoon"
       store_name: "Saskatoon"
-    - city: "Regina, SK"
+    - city: "Regina"
       store_name: "Regina"
 
   MB:
-    - city: "Winnipeg, MB"
+    - city: "Winnipeg"
       store_name: "Winnipeg"
 
   ON:
-    - city: "Toronto, ON"
+    - city: "Toronto"
       store_name: "Toronto"
-    - city: "Ottawa, ON"
+    - city: "Ottawa"
       store_name: "Ottawa"
-    - city: "Mississauga, ON"
+    - city: "Mississauga"
       store_name: "Mississauga"
 
   QC:
-    - city: "Montreal, QC"
+    - city: "Montreal"
       store_name: "Montreal"
 
   NB:
-    - city: "Fredericton, NB"
+    - city: "Fredericton"
       store_name: "Fredericton"
 
   NS:
-    - city: "Halifax, NS"
+    - city: "Halifax"
       store_name: "Halifax"
 
   PE:
-    - city: "Charlottetown, PE"
+    - city: "Charlottetown"
       store_name: "Charlottetown"
 
   NL:
-    - city: "St. John's, NL"
+    - city: "St. John's"
       store_name: "St. John's"
 
 # Product categories to validate
