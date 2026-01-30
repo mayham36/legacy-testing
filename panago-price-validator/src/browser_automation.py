@@ -45,15 +45,15 @@ class PanagoAutomation:
     ]
 
     # Product categories to scrape - matches panago.com URL structure
-    CATEGORIES = ["pizzas", "salads", "wings", "breadstuff", "dips", "dessert", "beverages"]
+    # Note: "Sides" contains wings, breadstuff, etc. on the actual site
+    CATEGORIES = ["pizzas", "salads", "sides", "dips", "dessert", "beverages"]
 
     # Menu URL paths for each category
     # Note: /menu/pizzas may redirect, so we use a subcategory
     CATEGORY_URLS = {
         "pizzas": "/menu/pizzas/meat",  # Use meat pizzas as main pizza page
         "salads": "/menu/salads",
-        "wings": "/menu/wings",
-        "breadstuff": "/menu/breadstuff",
+        "sides": "/menu/sides",  # Contains wings, breadstuff, etc.
         "dips": "/menu/dips",
         "dessert": "/menu/dessert",
         "beverages": "/menu/beverages",
@@ -73,8 +73,10 @@ class PanagoAutomation:
         "store_search_button": ".store-locations button[type='submit']",
         # Product elements - verified from panago.com/menu
         "product_card": "ul.products > li, .product-group",
-        "product_name": ".product-title h4, h4.product-title, .product-header h4",
+        "product_name": ".product-title h4, h4.product-title, .product-header h4, .product-group-title",
         "product_price": ".product-header .price, .prices li span, .price",
+        # Dips/extras use a different format: "Product Name / $1.25" in a label
+        "product_price_label": ".qty-picker label span",
         # Navigation
         "category_link": "ul.menu li a[href*='{category}']",
         # Loading states
@@ -443,12 +445,37 @@ class PanagoAutomation:
         for i in range(count):
             product = products.nth(i)
             try:
-                name = await product.locator(
-                    self.SELECTORS["product_name"]
-                ).text_content()
-                price_text = await product.locator(
-                    self.SELECTORS["product_price"]
-                ).text_content()
+                # Use .first to handle multiple matching elements (strict mode)
+                # Add timeout to prevent long hangs on pages with different structure
+                name_locator = product.locator(self.SELECTORS["product_name"])
+                name = None
+                try:
+                    if await name_locator.count() > 0:
+                        name = await name_locator.first.text_content(timeout=5000)
+                except Exception:
+                    pass  # Skip if name not found
+
+                # Products may have multiple prices (Small/Medium/Large/Extra-Large)
+                # Get the first price (typically the largest/most expensive)
+                price_locator = product.locator(self.SELECTORS["product_price"])
+                price_count = await price_locator.count()
+                price_text = None
+
+                if price_count > 0:
+                    # Standard format: price in dedicated element
+                    price_text = await price_locator.first.text_content(timeout=5000)
+                else:
+                    # Dips/extras format: "Product Name / $1.25" in label span
+                    label_locator = product.locator(self.SELECTORS["product_price_label"])
+                    if await label_locator.count() > 0:
+                        label_text = await label_locator.first.text_content(timeout=5000)
+                        # Extract price from "Product Name / $1.25" format
+                        if label_text and "$" in label_text:
+                            price_text = label_text
+
+                if not price_text:
+                    logger.debug("no_price_found", product_index=i, category=category)
+                    continue
 
                 prices.append(
                     PriceRecord(
@@ -473,6 +500,11 @@ class PanagoAutomation:
     def _parse_price(self, price_text: Optional[str]) -> Decimal:
         """Parse price string to Decimal.
 
+        Handles formats:
+        - "$26.50" (standard)
+        - "Product Name / $1.25" (dips/label format)
+        - "$6.85 8 pc" (with quantity suffix)
+
         Args:
             price_text: Raw price string.
 
@@ -483,9 +515,16 @@ class PanagoAutomation:
             return Decimal("0")
 
         cleaned = price_text.replace(",", "")
-        match = re.search(r"\$?(\d+\.?\d*)", cleaned)
+
+        # First try to match a price with $ prefix (most reliable)
+        match = re.search(r"\$(\d+\.?\d*)", cleaned)
         if match:
             return Decimal(match.group(1))
+
+        # Fallback: match the last number in the string (for edge cases)
+        matches = re.findall(r"(\d+\.?\d*)", cleaned)
+        if matches:
+            return Decimal(matches[-1])
 
         logger.warning("price_parse_failed", price_text=price_text)
         return Decimal("0")
