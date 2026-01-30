@@ -1,0 +1,66 @@
+# Test cities for each province
+# The Panago website uses a city picker (React Autosuggest), not full addresses
+# Enter city names in the format the site expects (e.g., "Vancouver, BC")
+
+provinces:
+  BC:
+    - city: "Vancouver, BC"
+      store_name: "Vancouver"
+    - city: "Victoria, BC"
+      store_name: "Victoria"
+    - city: "Surrey, BC"
+      store_name: "Surrey"
+
+  AB:
+    - city: "Calgary, AB"
+      store_name: "Calgary"
+    - city: "Edmonton, AB"
+      store_name: "Edmonton"
+
+  SK:
+    - city: "Saskatoon, SK"
+      store_name: "Saskatoon"
+    - city: "Regina, SK"
+      store_name: "Regina"
+
+  MB:
+    - city: "Winnipeg, MB"
+      store_name: "Winnipeg"
+
+  ON:
+    - city: "Toronto, ON"
+      store_name: "Toronto"
+    - city: "Ottawa, ON"
+      store_name: "Ottawa"
+    - city: "Mississauga, ON"
+      store_name: "Mississauga"
+
+  QC:
+    - city: "Montreal, QC"
+      store_name: "Montreal"
+
+  NB:
+    - city: "Fredericton, NB"
+      store_name: "Fredericton"
+
+  NS:
+    - city: "Halifax, NS"
+      store_name: "Halifax"
+
+  PE:
+    - city: "Charlottetown, PE"
+      store_name: "Charlottetown"
+
+  NL:
+    - city: "St. John's, NL"
+      store_name: "St. John's"
+
+# Product categories to validate
+# These should match the category identifiers on panago.com
+categories:
+  - pizzas
+  - salads
+  - sides
+  - dips
+  - desserts
+  - beverages

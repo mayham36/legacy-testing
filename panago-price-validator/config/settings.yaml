@@ -1,0 +1,91 @@
+# Automation Settings
+# Update these based on testing and site behavior
+
+# Timeouts (in milliseconds)
+timeout_ms: 30000
+page_load_timeout_ms: 60000
+
+# Browser settings
+headless: true
+viewport_width: 1280
+viewport_height: 720
+locale: "en-CA"
+
+# Parallelism
+max_concurrent: 5  # Number of simultaneous browser contexts
+# Higher values = faster, but more memory and may trigger rate limiting
+# Recommended: 5 for normal runs, 8 for fast validation
+
+# Retry logic
+retry_attempts: 3
+base_delay_ms: 1000
+
+# Rate limiting - delays between actions to avoid detection
+min_delay_ms: 2000  # Minimum delay between requests
+max_delay_ms: 5000  # Maximum delay (actual is random between min and max)
+category_delay_ms: 1500  # Delay between category navigations
+
+# Price comparison
+tolerance_dollars: 0.01  # Maximum acceptable price difference
+
+# DOM Selectors
+# VERIFIED from panago.com inspection - January 2026
+selectors:
+  # Location selection - VERIFIED (React Autosuggest component)
+  # Trigger the city picker modal
+  location_trigger: '.react-state-link-choose-location, #city_picker'
+  # City input field in the modal
+  city_input: '.react-autosuggest__input, input[placeholder="City"]'
+  # Autocomplete suggestions container
+  autocomplete_container: '.react-autosuggest__suggestions-container, #react-autowhatever-1'
+  autocomplete_suggestion: '.react-autosuggest__suggestion, [role="option"]'
+  # Save city button
+  save_city_button: '.location-choice-panel .primary.button, a.primary.button'
+  # Close modal button
+  close_modal: '.location-choice-panel .panago-icon-exit'
+
+  # Store locator page (/locations) - VERIFIED
+  store_search_input: '.store-locations input[name="name"], input[placeholder="Enter Postal Code or Address"]'
+  store_search_button: '.store-locations button[type="submit"], .store-locations .button'
+
+  # Product listing - VERIFIED from panago.com/menu
+  product_card: 'ul.products > li, .product-group'
+  product_name: '.product-title h4, h4.product-title, .product-header h4, h4.product-group-title'
+  product_price: '.product-header .price, .prices li span, .price'
+
+  # Category navigation - VERIFIED
+  category_tab: 'ul.menu li a[href*="{category}"]'
+  category_link: 'a[href*="/menu/{category}"], ul.menu a[href*="{category}"]'
+
+  # Loading states
+  loading_spinner: '.loading, .spinner, [class*="loading"]'
+  page_content: 'ul.products, .product-group'
+
+  # Modal (React-based)
+  modal_container: '.react-modal-primary, [class*="modal"]'
+  modal_close: '.modal-close, button[aria-label="Close"]'
+
+# Menu URLs for direct navigation
+menu_urls:
+  pizzas: '/menu/pizzas'
+  deals: '/menu/deals'
+  salads: '/menu/salads'
+  sides: '/menu/sides'
+  dips: '/menu/dips'
+  desserts: '/menu/dessert'
+  beverages: '/menu/beverages'
+
+# Fallback selectors if primary selectors fail
+fallback_selectors:
+  product_card:
+    - '.product-group'
+    - 'li[class*="product"]'
+    - '.feature-item'
+  product_name:
+    - 'h4'
+    - '.heading'
+    - '[class*="title"]'
+  product_price:
+    - '.prices span'
+    - '[class*="price"]'
+    - '.cost'
