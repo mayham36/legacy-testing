@@ -51,11 +51,19 @@ def compare_prices(
     if "expected_price" in expected_df.columns:
         expected_df = expected_df.rename(columns={"expected_price": "expected_price"})
 
-    # Merge on product_name, category, province
+    # Determine merge keys based on whether size column exists
+    merge_keys = ["product_name", "category", "province"]
+    if "size" in actual_df.columns:
+        # Add size to merge keys if present (for products with size variants)
+        merge_keys.append("size")
+        # Ensure expected_df also has size column (may be None)
+        if "size" not in expected_df.columns:
+            expected_df["size"] = None
+
     merged = pd.merge(
         expected_df,
         actual_df,
-        on=["product_name", "category", "province"],
+        on=merge_keys,
         how="outer",
         suffixes=("_expected", "_actual"),
     )
@@ -101,6 +109,7 @@ def compare_prices(
         "store_name",
         "category",
         "product_name",
+        "size",
         "expected_price",
         "actual_price",
         "price_difference",
@@ -157,6 +166,7 @@ def _create_empty_results(message: str) -> dict:
         "store_name",
         "category",
         "product_name",
+        "size",
         "expected_price",
         "actual_price",
         "price_difference",

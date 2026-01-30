@@ -75,6 +75,10 @@ class PanagoAutomation:
         "product_card": "ul.products > li, .product-group",
         "product_name": ".product-title h4, h4.product-title, .product-header h4, .product-group-title",
         "product_price": ".product-header .price, .prices li span, .price",
+        # Size/price pairs for products with multiple sizes (pizzas, etc.)
+        "price_list_item": ".prices li",
+        "price_size_label": "label",
+        "price_value": "span",
         # Dips/extras use a different format: "Product Name / $1.25" in a label
         "product_price_label": ".qty-picker label span",
         # Navigation
@@ -455,38 +459,79 @@ class PanagoAutomation:
                 except Exception:
                     pass  # Skip if name not found
 
-                # Products may have multiple prices (Small/Medium/Large/Extra-Large)
-                # Get the first price (typically the largest/most expensive)
-                price_locator = product.locator(self.SELECTORS["product_price"])
-                price_count = await price_locator.count()
-                price_text = None
+                # Check for products with multiple size/price variants (pizzas, etc.)
+                price_list_items = product.locator(self.SELECTORS["price_list_item"])
+                price_list_count = await price_list_items.count()
 
-                if price_count > 0:
-                    # Standard format: price in dedicated element
-                    price_text = await price_locator.first.text_content(timeout=5000)
+                if price_list_count > 1:
+                    # Multiple sizes - extract each size/price pair
+                    for j in range(price_list_count):
+                        item = price_list_items.nth(j)
+                        try:
+                            # Get size label (e.g., "Extra-Large:", "Large:", etc.)
+                            size_label = item.locator(self.SELECTORS["price_size_label"])
+                            size = None
+                            if await size_label.count() > 0:
+                                size_text = await size_label.first.text_content(timeout=5000)
+                                # Clean up: remove trailing colon and whitespace
+                                size = size_text.strip().rstrip(":").strip() if size_text else None
+
+                            # Get price value
+                            price_elem = item.locator(self.SELECTORS["price_value"])
+                            if await price_elem.count() > 0:
+                                price_text = await price_elem.first.text_content(timeout=5000)
+                                if price_text:
+                                    prices.append(
+                                        PriceRecord(
+                                            province=location.province,
+                                            store_name=location.store_name,
+                                            category=category,
+                                            product_name=name.strip() if name else "",
+                                            actual_price=self._parse_price(price_text),
+                                            raw_price_text=price_text,
+                                            size=size,
+                                        )
+                                    )
+                        except Exception as e:
+                            logger.debug(
+                                "size_extraction_failed",
+                                product_index=i,
+                                size_index=j,
+                                error=str(e),
+                            )
                 else:
-                    # Dips/extras format: "Product Name / $1.25" in label span
-                    label_locator = product.locator(self.SELECTORS["product_price_label"])
-                    if await label_locator.count() > 0:
-                        label_text = await label_locator.first.text_content(timeout=5000)
-                        # Extract price from "Product Name / $1.25" format
-                        if label_text and "$" in label_text:
-                            price_text = label_text
+                    # Single price or different format
+                    price_locator = product.locator(self.SELECTORS["product_price"])
+                    price_count = await price_locator.count()
+                    price_text = None
 
-                if not price_text:
-                    logger.debug("no_price_found", product_index=i, category=category)
-                    continue
+                    if price_count > 0:
+                        # Standard format: price in dedicated element
+                        price_text = await price_locator.first.text_content(timeout=5000)
+                    else:
+                        # Dips/extras format: "Product Name / $1.25" in label span
+                        label_locator = product.locator(self.SELECTORS["product_price_label"])
+                        if await label_locator.count() > 0:
+                            label_text = await label_locator.first.text_content(timeout=5000)
+                            # Extract price from "Product Name / $1.25" format
+                            if label_text and "$" in label_text:
+                                price_text = label_text
 
-                prices.append(
-                    PriceRecord(
-                        province=location.province,
-                        store_name=location.store_name,
-                        category=category,
-                        product_name=name.strip() if name else "",
-                        actual_price=self._parse_price(price_text),
-                        raw_price_text=price_text or "",
+                    if not price_text:
+                        logger.debug("no_price_found", product_index=i, category=category)
+                        continue
+
+                    prices.append(
+                        PriceRecord(
+                            province=location.province,
+                            store_name=location.store_name,
+                            category=category,
+                            product_name=name.strip() if name else "",
+                            actual_price=self._parse_price(price_text),
+                            raw_price_text=price_text or "",
+                            size=None,
+                        )
                     )
-                )
             except Exception as e:
                 logger.warning(
                     "product_extraction_failed",

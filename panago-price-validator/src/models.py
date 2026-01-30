@@ -48,6 +48,7 @@ class PriceRecord:
     product_name: str
     actual_price: Decimal
     raw_price_text: str
+    size: Optional[str] = None  # Size variant (e.g., "Small", "Medium", "Large", "Extra-Large")
     scraped_at: datetime = field(default_factory=datetime.now)
 
     def to_dict(self) -> dict:
@@ -57,6 +58,7 @@ class PriceRecord:
             "store_name": self.store_name,
             "category": self.category,
             "product_name": self.product_name,
+            "size": self.size,
             "actual_price": float(self.actual_price),
             "raw_price_text": self.raw_price_text,
             "scraped_at": self.scraped_at.isoformat(),
@@ -74,6 +76,7 @@ class ValidationResult:
     expected_price: Optional[Decimal]
     actual_price: Optional[Decimal]
     status: ValidationStatus
+    size: Optional[str] = None  # Size variant for products with multiple sizes
     price_difference: Optional[Decimal] = None
 
     def __post_init__(self) -> None:
