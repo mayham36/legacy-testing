@@ -13,6 +13,20 @@ from .comparison import compare_prices
 from .config_loader import load_settings
 
 
+def run_web_server(host: str = "0.0.0.0", port: int = 8080):
+    """Start the web UI server."""
+    import uvicorn
+    from .web.app import app
+
+    print(f"\n{'=' * 60}")
+    print("PANAGO PRICE VALIDATOR - WEB UI")
+    print(f"{'=' * 60}")
+    print(f"Starting web server on http://{host}:{port}")
+    print(f"{'=' * 60}\n")
+
+    uvicorn.run(app, host=host, port=port, log_level="info")
+
+
 def configure_logging(verbose: bool = False) -> None:
     """Configure structured logging.
 
@@ -73,9 +87,8 @@ Examples:
     parser.add_argument(
         "--input",
         "-i",
-        required=True,
         type=Path,
-        help="Path to expected prices Excel file",
+        help="Path to expected prices Excel file (required for CLI mode)",
     )
     parser.add_argument(
         "--output",
@@ -155,6 +168,22 @@ Examples:
         action="store_true",
         help="Enable verbose logging",
     )
+    parser.add_argument(
+        "--web",
+        action="store_true",
+        help="Start web UI server instead of CLI",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8080,
+        help="Port for web server (default: 8080)",
+    )
+    parser.add_argument(
+        "--host",
+        default="0.0.0.0",
+        help="Host for web server (default: 0.0.0.0)",
+    )
 
     return parser.parse_args()
 
@@ -167,6 +196,18 @@ def main() -> int:
         2+ for errors.
     """
     args = parse_args()
+
+    # Web UI mode
+    if args.web:
+        run_web_server(host=args.host, port=args.port)
+        return 0
+
+    # CLI mode requires input file
+    if not args.input:
+        print("Error: --input/-i is required for CLI mode", file=sys.stderr)
+        print("Use --web to start the web UI instead", file=sys.stderr)
+        return 2
+
     configure_logging(args.verbose)
 
     logger = structlog.get_logger()

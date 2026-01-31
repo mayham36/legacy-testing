@@ -1,6 +1,21 @@
 version: '3.8'
 
 services:
+  # Web UI - default service
+  web:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./input:/app/input
+      - ./output:/app/output
+      - ./config:/app/config
+    environment:
+      - PYTHONUNBUFFERED=1
+    # Default: run web UI
+    command: ["--web", "--port", "8080"]
+
+  # CLI validator against QA
   validator:
     build: .
     volumes:
@@ -10,10 +25,12 @@ services:
       - ./config:/app/config
     environment:
       - PYTHONUNBUFFERED=1
-    # Default: run against QA with safe mode
+    # Run CLI against QA with safe mode
     command: ["-i", "input/expected_prices.xlsx", "--env", "qa"]
+    profiles:
+      - cli
 
-  # Convenience service for running against production
+  # CLI service for running against production
   validator-production:
     build: .
     volumes:
@@ -26,7 +43,7 @@ services:
     profiles:
       - production
 
-  # Convenience service for running a single province
+  # CLI service for running a single province
   validator-bc-only:
     build: .
     volumes:

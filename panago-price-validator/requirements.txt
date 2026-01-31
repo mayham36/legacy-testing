@@ -7,3 +7,8 @@ tenacity>=8.0
 structlog>=23.0
 pytest>=7.0.0
 pytest-asyncio>=0.21.0
+# Web UI dependencies
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+jinja2>=3.1.0
+python-multipart>=0.0.6

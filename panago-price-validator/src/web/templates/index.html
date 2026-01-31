@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Panago Price Validator</title>
+    <!-- Material Design 3 via Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <div class="container">
+        <header class="header">
+            <h1>Panago Price Validator</h1>
+            <p class="subtitle">Select cities to validate pricing</p>
+        </header>
+
+        <div class="controls">
+            <button type="button" class="btn btn-outlined" onclick="selectAll()">
+                <span class="material-icons">select_all</span>
+                Select All
+            </button>
+            <button type="button" class="btn btn-outlined" onclick="deselectAll()">
+                <span class="material-icons">deselect</span>
+                Deselect All
+            </button>
+            <span class="selection-count" id="selectionCount">0 selected</span>
+        </div>
+
+        <form id="validationForm" onsubmit="startValidation(event)">
+            <div class="provinces-grid">
+                {% for province, cities in provinces.items() %}
+                <div class="province-section">
+                    <h2 class="province-title">{{ province }}</h2>
+                    <div class="cities-grid">
+                        {% for city in cities %}
+                        <label class="city-tile" data-province="{{ province }}">
+                            <input type="checkbox" name="cities" value="{{ province }}:{{ city.city }}" onchange="updateCount()">
+                            <div class="tile-content">
+                                <span class="material-icons city-icon">location_city</span>
+                                <span class="city-name">{{ city.city }}</span>
+                            </div>
+                            <span class="checkmark">
+                                <span class="material-icons">check</span>
+                            </span>
+                        </label>
+                        {% endfor %}
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+
+            <div class="actions">
+                <button type="submit" class="btn btn-primary" id="runBtn">
+                    <span class="material-icons">play_arrow</span>
+                    Run Validation
+                </button>
+            </div>
+        </form>
+
+        <!-- Progress Section (hidden initially) -->
+        <div id="progressSection" class="progress-section hidden">
+            <div class="progress-card">
+                <h3>Validation in Progress</h3>
+                <div class="progress-bar-container">
+                    <div class="progress-bar" id="progressBar" style="width: 0%"></div>
+                </div>
+                <p class="progress-message" id="progressMessage">Starting...</p>
+                <div class="progress-spinner" id="spinner">
+                    <div class="spinner"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Results Section (hidden initially) -->
+        <div id="resultsSection" class="results-section hidden">
+            <div class="results-card">
+                <span class="material-icons result-icon success">check_circle</span>
+                <h3>Validation Complete</h3>
+                <p class="result-summary" id="resultSummary"></p>
+                <button type="button" class="btn btn-primary" onclick="downloadResults()">
+                    <span class="material-icons">download</span>
+                    Download Results
+                </button>
+                <button type="button" class="btn btn-outlined" onclick="resetForm()">
+                    <span class="material-icons">refresh</span>
+                    Run Again
+                </button>
+            </div>
+        </div>
+
+        <!-- Error Section (hidden initially) -->
+        <div id="errorSection" class="error-section hidden">
+            <div class="error-card">
+                <span class="material-icons result-icon error">error</span>
+                <h3>Validation Failed</h3>
+                <p class="error-message" id="errorMessage"></p>
+                <button type="button" class="btn btn-outlined" onclick="resetForm()">
+                    <span class="material-icons">refresh</span>
+                    Try Again
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentJobId = null;
+        let eventSource = null;
+
+        function updateCount() {
+            const checked = document.querySelectorAll('input[name="cities"]:checked').length;
+            document.getElementById('selectionCount').textContent = checked + ' selected';
+        }
+
+        function selectAll() {
+            document.querySelectorAll('input[name="cities"]').forEach(cb => cb.checked = true);
+            updateCount();
+        }
+
+        function deselectAll() {
+            document.querySelectorAll('input[name="cities"]').forEach(cb => cb.checked = false);
+            updateCount();
+        }
+
+        async function startValidation(event) {
+            event.preventDefault();
+
+            const formData = new FormData(event.target);
+            const cities = formData.getAll('cities');
+
+            if (cities.length === 0) {
+                alert('Please select at least one city');
+                return;
+            }
+
+            // Hide form, show progress
+            document.getElementById('validationForm').classList.add('hidden');
+            document.querySelector('.controls').classList.add('hidden');
+            document.getElementById('progressSection').classList.remove('hidden');
+            document.getElementById('resultsSection').classList.add('hidden');
+            document.getElementById('errorSection').classList.add('hidden');
+
+            try {
+                const response = await fetch('/run', {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await response.json();
+
+                if (data.error) {
+                    showError(data.error);
+                    return;
+                }
+
+                currentJobId = data.job_id;
+                startPolling(currentJobId);
+
+            } catch (error) {
+                showError('Failed to start validation: ' + error.message);
+            }
+        }
+
+        function startPolling(jobId) {
+            // Use SSE for real-time updates
+            eventSource = new EventSource('/stream/' + jobId);
+
+            eventSource.onmessage = function(event) {
+                const data = JSON.parse(event.data);
+
+                if (data.error) {
+                    eventSource.close();
+                    showError(data.error);
+                    return;
+                }
+
+                updateProgress(data);
+
+                if (data.status === 'completed') {
+                    eventSource.close();
+                    showResults(data);
+                } else if (data.status === 'error') {
+                    eventSource.close();
+                    showError(data.message);
+                }
+            };
+
+            eventSource.onerror = function() {
+                eventSource.close();
+                // Fallback to polling
+                pollStatus(jobId);
+            };
+        }
+
+        async function pollStatus(jobId) {
+            try {
+                const response = await fetch('/status/' + jobId);
+                const data = await response.json();
+
+                if (data.error) {
+                    showError(data.error);
+                    return;
+                }
+
+                updateProgress(data);
+
+                if (data.status === 'completed') {
+                    showResults(data);
+                } else if (data.status === 'error') {
+                    showError(data.message);
+                } else {
+                    // Continue polling
+                    setTimeout(() => pollStatus(jobId), 2000);
+                }
+            } catch (error) {
+                showError('Failed to check status: ' + error.message);
+            }
+        }
+
+        function updateProgress(data) {
+            document.getElementById('progressBar').style.width = data.progress + '%';
+            document.getElementById('progressMessage').textContent = data.message;
+        }
+
+        function showResults(data) {
+            document.getElementById('progressSection').classList.add('hidden');
+            document.getElementById('resultsSection').classList.remove('hidden');
+            document.getElementById('resultSummary').textContent = data.message;
+        }
+
+        function showError(message) {
+            document.getElementById('progressSection').classList.add('hidden');
+            document.getElementById('errorSection').classList.remove('hidden');
+            document.getElementById('errorMessage').textContent = message;
+        }
+
+        function downloadResults() {
+            if (currentJobId) {
+                window.location.href = '/download/' + currentJobId;
+            }
+        }
+
+        function resetForm() {
+            document.getElementById('validationForm').classList.remove('hidden');
+            document.querySelector('.controls').classList.remove('hidden');
+            document.getElementById('progressSection').classList.add('hidden');
+            document.getElementById('resultsSection').classList.add('hidden');
+            document.getElementById('errorSection').classList.add('hidden');
+            document.getElementById('progressBar').style.width = '0%';
+            currentJobId = null;
+        }
+    </script>
+</body>
+</html>

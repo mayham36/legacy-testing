@@ -51,6 +51,10 @@ RUN mkdir -p output
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
-# Default command - show help
+# Expose web UI port
+EXPOSE 8080
+
+# Default command - run web server
+# Use --web flag for web UI, otherwise runs CLI
 ENTRYPOINT ["python", "-m", "src.main"]
-CMD ["--help"]
+CMD ["--web"]
