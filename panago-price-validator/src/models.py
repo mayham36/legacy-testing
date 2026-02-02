@@ -16,6 +16,13 @@ class ValidationStatus(StrEnum):
     MISSING_ACTUAL = "MISSING_ACTUAL"
 
 
+class PriceSource(StrEnum):
+    """Source of the price data."""
+
+    MENU = "menu"
+    CART = "cart"
+
+
 @dataclass(frozen=True)
 class LocationConfig:
     """Configuration for a store location."""
@@ -49,6 +56,7 @@ class PriceRecord:
     actual_price: Decimal
     raw_price_text: str
     size: Optional[str] = None  # Size variant (e.g., "Small", "Medium", "Large", "Extra-Large")
+    price_source: PriceSource = PriceSource.MENU  # Source of price (menu or cart)
     scraped_at: datetime = field(default_factory=datetime.now)
 
     def to_dict(self) -> dict:
@@ -61,6 +69,7 @@ class PriceRecord:
             "size": self.size,
             "actual_price": float(self.actual_price),
             "raw_price_text": self.raw_price_text,
+            "price_source": str(self.price_source),
             "scraped_at": self.scraped_at.isoformat(),
         }
 

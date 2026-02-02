@@ -9,7 +9,7 @@ import structlog
 from .models import AutomationConfig
 from .excel_handler import load_expected_prices, save_results
 from .browser_automation import PanagoAutomation
-from .comparison import compare_prices
+from .comparison import compare_prices, compare_menu_vs_cart
 from .config_loader import load_settings
 
 
@@ -169,6 +169,11 @@ Examples:
         help="Enable verbose logging",
     )
     parser.add_argument(
+        "--cart-prices",
+        action="store_true",
+        help="Compare menu prices to cart prices (slower - adds each item to cart)",
+    )
+    parser.add_argument(
         "--web",
         action="store_true",
         help="Start web UI server instead of CLI",
@@ -286,19 +291,36 @@ def main() -> int:
             base_url=base_url,
             min_delay_ms=min_delay,
             max_delay_ms=max_delay,
+            capture_cart_prices=args.cart_prices,
         )
         actual_prices = automation.run_price_collection()
         logger.info("collected_actual_prices", count=len(actual_prices))
 
-        # Compare prices
+        # Compare prices (expected vs actual menu prices)
         results = compare_prices(
             expected_prices,
             actual_prices,
             tolerance=args.tolerance,
         )
 
+        # Compare menu vs cart prices if cart capture was enabled
+        menu_vs_cart_results = None
+        if args.cart_prices:
+            menu_vs_cart_results = compare_menu_vs_cart(
+                actual_prices,
+                tolerance=args.tolerance,
+            )
+            logger.info(
+                "menu_vs_cart_comparison",
+                summary=menu_vs_cart_results["summary"],
+            )
+
         # Save results
-        output_path = save_results(results, config.output_dir)
+        output_path = save_results(
+            results,
+            config.output_dir,
+            menu_vs_cart_results=menu_vs_cart_results,
+        )
 
         logger.info(
             "validation_complete",
@@ -311,11 +333,19 @@ def main() -> int:
         print("VALIDATION COMPLETE")
         print(f"{'=' * 60}")
         print(f"Summary: {results['summary']}")
+
+        if menu_vs_cart_results:
+            print(f"Cart Comparison: {menu_vs_cart_results['summary']}")
+
         print(f"Results saved to: {output_path}")
 
         if not results["discrepancies_df"].empty:
             print(f"\nDiscrepancies found: {len(results['discrepancies_df'])}")
             print("Review the 'Discrepancies' sheet in the output file.")
+
+        if menu_vs_cart_results and not menu_vs_cart_results["mismatches_df"].empty:
+            print(f"\nCart price mismatches: {len(menu_vs_cart_results['mismatches_df'])}")
+            print("Review the 'Cart Mismatches' sheet in the output file.")
 
         print(f"{'=' * 60}\n")
 

@@ -14,7 +14,7 @@ from fastapi.templating import Jinja2Templates
 from ..models import AutomationConfig, LocationConfig
 from ..browser_automation import PanagoAutomation
 from ..excel_handler import load_expected_prices, save_results
-from ..comparison import compare_prices
+from ..comparison import compare_prices, compare_menu_vs_cart
 from ..config_loader import load_settings
 
 app = FastAPI(title="Panago Price Validator", version="1.0.0")
@@ -116,6 +116,7 @@ async def run_validation(request: Request, background_tasks: BackgroundTasks):
     """Start a validation run for selected cities."""
     form_data = await request.form()
     selected_cities = form_data.getlist("cities")
+    capture_cart = form_data.get("capture_cart") == "on"
 
     if not selected_cities:
         return {"error": "No cities selected", "status": "error"}
@@ -127,17 +128,18 @@ async def run_validation(request: Request, background_tasks: BackgroundTasks):
         "progress": 0,
         "message": "Starting...",
         "cities": selected_cities,
+        "capture_cart": capture_cart,
         "result_file": None,
         "error": None,
     }
 
     # Start background task
-    background_tasks.add_task(run_validation_task, job_id, selected_cities)
+    background_tasks.add_task(run_validation_task, job_id, selected_cities, capture_cart)
 
     return {"job_id": job_id, "status": "started"}
 
 
-async def run_validation_task(job_id: str, selected_cities: list[str]):
+async def run_validation_task(job_id: str, selected_cities: list[str], capture_cart: bool = False):
     """Background task to run the validation."""
     job = jobs[job_id]
 
@@ -163,7 +165,8 @@ async def run_validation_task(job_id: str, selected_cities: list[str]):
                     ))
                     break
 
-        job["message"] = f"Validating {len(locations)} location(s)..."
+        cart_mode_text = " (with cart comparison)" if capture_cart else ""
+        job["message"] = f"Validating {len(locations)} location(s){cart_mode_text}..."
         job["progress"] = 10
 
         # Load settings
@@ -201,13 +204,15 @@ async def run_validation_task(job_id: str, selected_cities: list[str]):
             base_url=base_url,
             min_delay_ms=min_delay,
             max_delay_ms=max_delay,
+            capture_cart_prices=capture_cart,
         )
 
         # Override locations with selected ones
         automation.set_locations(locations)
 
         # Run collection (this is the long part)
-        job["message"] = f"Collecting prices from {len(locations)} location(s)..."
+        cart_note = " (including cart prices - this may take a while)" if capture_cart else ""
+        job["message"] = f"Collecting prices from {len(locations)} location(s){cart_note}..."
         job["progress"] = 20
 
         # Run async collection
@@ -219,17 +224,29 @@ async def run_validation_task(job_id: str, selected_cities: list[str]):
         # Load expected prices
         expected_prices = load_expected_prices(config.input_file)
 
-        # Compare prices
+        # Compare prices (expected vs actual menu prices)
         results = compare_prices(expected_prices, actual_prices, tolerance=0.01)
+
+        # Compare menu vs cart prices if cart capture was enabled
+        menu_vs_cart_results = None
+        if capture_cart:
+            job["message"] = "Comparing menu vs cart prices..."
+            job["progress"] = 85
+            menu_vs_cart_results = compare_menu_vs_cart(actual_prices, tolerance=0.01)
 
         job["message"] = "Saving results..."
         job["progress"] = 90
 
         # Save results
-        output_path = save_results(results, config.output_dir)
+        output_path = save_results(results, config.output_dir, menu_vs_cart_results=menu_vs_cart_results)
+
+        # Build summary message
+        summary_parts = [results['summary']]
+        if menu_vs_cart_results:
+            summary_parts.append(menu_vs_cart_results['summary'])
 
         job["status"] = "completed"
-        job["message"] = f"Complete! {results['summary']}"
+        job["message"] = f"Complete! {' | '.join(summary_parts)}"
         job["progress"] = 100
         job["result_file"] = str(output_path)
 

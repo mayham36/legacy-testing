@@ -4,7 +4,7 @@ from typing import Optional
 
 import pandas as pd
 
-from .models import ValidationStatus, PriceRecord
+from .models import ValidationStatus, PriceRecord, PriceSource
 
 
 def compare_prices(
@@ -219,3 +219,126 @@ def calculate_summary_by_province(details_df: pd.DataFrame) -> pd.DataFrame:
     )
 
     return summary
+
+
+def compare_menu_vs_cart(
+    prices: list[PriceRecord],
+    tolerance: float = 0.01,
+) -> dict:
+    """Compare menu prices to cart prices for the same products.
+
+    This function filters prices by source (menu vs cart), merges them by
+    product identifier, and calculates whether the prices match within tolerance.
+
+    Args:
+        prices: List of PriceRecord objects containing both menu and cart prices.
+        tolerance: Maximum acceptable price difference in dollars (default: $0.01).
+
+    Returns:
+        Dictionary containing:
+            - summary: Human-readable summary string
+            - comparison_df: Full merged DataFrame with menu and cart prices side by side
+            - mismatches_df: DataFrame with only products where menu != cart price
+    """
+    if not prices:
+        return _create_empty_menu_vs_cart_results("No prices to compare")
+
+    # Convert to DataFrame
+    all_df = pd.DataFrame([p.to_dict() for p in prices])
+
+    # Split by price source
+    menu_df = all_df[all_df["price_source"] == str(PriceSource.MENU)].copy()
+    cart_df = all_df[all_df["price_source"] == str(PriceSource.CART)].copy()
+
+    if menu_df.empty:
+        return _create_empty_menu_vs_cart_results("No menu prices found")
+
+    if cart_df.empty:
+        return _create_empty_menu_vs_cart_results("No cart prices found")
+
+    # Merge on product identifiers
+    merge_keys = ["product_name", "province", "store_name", "category"]
+    if "size" in menu_df.columns and "size" in cart_df.columns:
+        merge_keys.append("size")
+
+    merged = pd.merge(
+        menu_df,
+        cart_df,
+        on=merge_keys,
+        how="outer",
+        suffixes=("_menu", "_cart"),
+    )
+
+    # Calculate price difference
+    merged["price_difference"] = (
+        merged["actual_price_cart"].astype(float) - merged["actual_price_menu"].astype(float)
+    ).round(2)
+
+    # Determine if prices match within tolerance
+    merged["prices_match"] = abs(merged["price_difference"]) <= tolerance
+
+    # Generate summary statistics
+    total_compared = len(merged)
+    matched = merged["prices_match"].sum()
+    mismatched = total_compared - matched
+
+    # Select output columns
+    output_columns = [
+        "province",
+        "store_name",
+        "category",
+        "product_name",
+    ]
+    if "size" in merge_keys:
+        output_columns.append("size")
+    output_columns.extend([
+        "actual_price_menu",
+        "actual_price_cart",
+        "price_difference",
+        "prices_match",
+    ])
+
+    available_columns = [c for c in output_columns if c in merged.columns]
+    comparison_df = merged[available_columns].copy()
+
+    # Rename columns for clarity
+    comparison_df = comparison_df.rename(columns={
+        "actual_price_menu": "menu_price",
+        "actual_price_cart": "cart_price",
+    })
+
+    mismatches_df = comparison_df[~comparison_df["prices_match"]].copy()
+
+    return {
+        "summary": f"Menu vs Cart - Matched: {matched}, Mismatched: {mismatched} of {total_compared} products",
+        "comparison_df": comparison_df,
+        "mismatches_df": mismatches_df,
+    }
+
+
+def _create_empty_menu_vs_cart_results(message: str) -> dict:
+    """Create empty results structure for menu vs cart comparison.
+
+    Args:
+        message: Summary message to include.
+
+    Returns:
+        Dictionary with empty DataFrames and summary.
+    """
+    output_columns = [
+        "province",
+        "store_name",
+        "category",
+        "product_name",
+        "size",
+        "menu_price",
+        "cart_price",
+        "price_difference",
+        "prices_match",
+    ]
+
+    return {
+        "summary": message,
+        "comparison_df": pd.DataFrame(columns=output_columns),
+        "mismatches_df": pd.DataFrame(columns=output_columns),
+    }

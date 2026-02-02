@@ -121,12 +121,18 @@ def load_expected_prices(filepath: Path) -> pd.DataFrame:
     return df
 
 
-def save_results(results: dict, output_dir: Path) -> Path:
+def save_results(
+    results: dict,
+    output_dir: Path,
+    menu_vs_cart_results: dict | None = None,
+) -> Path:
     """Save comparison results to Excel with security controls.
 
     Args:
         results: Dictionary containing summary_df, details_df, discrepancies_df.
         output_dir: Directory to save the output file.
+        menu_vs_cart_results: Optional dictionary with menu vs cart comparison results.
+            Contains comparison_df and mismatches_df.
 
     Returns:
         Path to the created output file.
@@ -187,5 +193,41 @@ def save_results(results: dict, output_dir: Path) -> Path:
         worksheet = writer.sheets["Discrepancies"]
         for col_num, value in enumerate(discrepancies_df.columns.values):
             worksheet.write(0, col_num, value, header_format)
+
+        # Menu vs Cart comparison sheets (if provided)
+        if menu_vs_cart_results:
+            # Menu vs Cart comparison sheet
+            comparison_df = menu_vs_cart_results.get("comparison_df", pd.DataFrame())
+            if not comparison_df.empty:
+                comparison_df.to_excel(writer, sheet_name="Menu vs Cart", index=False)
+                worksheet = writer.sheets["Menu vs Cart"]
+                for col_num, value in enumerate(comparison_df.columns.values):
+                    worksheet.write(0, col_num, value, header_format)
+
+                # Apply conditional formatting on prices_match column
+                if "prices_match" in comparison_df.columns:
+                    match_col = comparison_df.columns.get_loc("prices_match")
+                    worksheet.conditional_format(
+                        1,
+                        match_col,
+                        len(comparison_df) + 1,
+                        match_col,
+                        {"type": "cell", "criteria": "==", "value": True, "format": pass_format},
+                    )
+                    worksheet.conditional_format(
+                        1,
+                        match_col,
+                        len(comparison_df) + 1,
+                        match_col,
+                        {"type": "cell", "criteria": "==", "value": False, "format": fail_format},
+                    )
+
+            # Cart Mismatches sheet
+            mismatches_df = menu_vs_cart_results.get("mismatches_df", pd.DataFrame())
+            if not mismatches_df.empty:
+                mismatches_df.to_excel(writer, sheet_name="Cart Mismatches", index=False)
+                worksheet = writer.sheets["Cart Mismatches"]
+                for col_num, value in enumerate(mismatches_df.columns.values):
+                    worksheet.write(0, col_num, value, header_format)
 
     return output_path

@@ -11,7 +11,7 @@ import structlog
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
-from .models import AutomationConfig, PriceRecord, LocationConfig
+from .models import AutomationConfig, PriceRecord, LocationConfig, PriceSource
 from .config_loader import load_locations
 
 logger = structlog.get_logger()
@@ -87,6 +87,24 @@ class PanagoAutomation:
         "loading_spinner": ".loading, .spinner, [class*='loading']",
     }
 
+    # Cart interaction selectors - for capturing prices from the shopping cart
+    CART_SELECTORS = {
+        # Product modal (opens when clicking a product card)
+        "product_modal": ".product-modal, [class*='product-modal'], .modal, .product-detail",
+        "size_option": ".size-option, [class*='size'] label, .prices li label, .size-selector label",
+        "add_to_cart_button": "button.add-to-cart, .add-to-cart, [class*='add-to-cart'], button[type='submit']",
+        # Cart sidebar/modal
+        "cart_icon": ".cart-icon, [class*='cart'], header a[href*='cart'], .shopping-cart-icon",
+        "cart_sidebar": ".cart-sidebar, [class*='cart-panel'], .shopping-cart, .cart-drawer",
+        "cart_item": ".cart-item, [class*='cart-item'], .line-item, .cart-product",
+        "cart_item_name": ".cart-item-name, .item-title, .product-name, .line-item-title",
+        "cart_item_price": ".cart-item-price, .item-price, .line-item-price, .product-price",
+        "remove_item": ".remove-item, .delete-item, [class*='remove'], button[aria-label*='remove']",
+        "clear_cart": ".clear-cart, [class*='clear-cart'], .empty-cart",
+        # Modal controls
+        "close_modal": ".close, [class*='close'], button[aria-label='Close'], .modal-close",
+    }
+
     def __init__(
         self,
         config: AutomationConfig,
@@ -94,6 +112,7 @@ class PanagoAutomation:
         base_url: str = "https://www.panago.com",
         min_delay_ms: int = 3000,
         max_delay_ms: int = 6000,
+        capture_cart_prices: bool = False,
     ) -> None:
         """Initialize the automation engine.
 
@@ -103,11 +122,13 @@ class PanagoAutomation:
             base_url: Base URL for the target environment (QA or Production).
             min_delay_ms: Minimum delay between actions in milliseconds.
             max_delay_ms: Maximum delay between actions in milliseconds.
+            capture_cart_prices: If True, also capture prices from cart (slower).
         """
         self.config = config
         self.base_url = base_url
         self.min_delay_ms = min_delay_ms
         self.max_delay_ms = max_delay_ms
+        self.capture_cart_prices = capture_cart_prices
         self._semaphore: Optional[asyncio.Semaphore] = None
         self._locations_path = locations_path
         self._locations: list[LocationConfig] = []
@@ -490,8 +511,22 @@ class PanagoAutomation:
                                             actual_price=self._parse_price(price_text),
                                             raw_price_text=price_text,
                                             size=size,
+                                            price_source=PriceSource.MENU,
                                         )
                                     )
+                                    # Capture cart price if enabled
+                                    if self.capture_cart_prices:
+                                        cart_record = await self._capture_cart_price_for_product(
+                                            page,
+                                            product,
+                                            name.strip() if name else "",
+                                            size,
+                                            location,
+                                            category,
+                                        )
+                                        if cart_record:
+                                            prices.append(cart_record)
+                                        await self._wait_with_jitter(1000, 2000)
                         except Exception as e:
                             logger.debug(
                                 "size_extraction_failed",
@@ -530,8 +565,22 @@ class PanagoAutomation:
                             actual_price=self._parse_price(price_text),
                             raw_price_text=price_text or "",
                             size=None,
+                            price_source=PriceSource.MENU,
                         )
                     )
+                    # Capture cart price if enabled (for single-price products)
+                    if self.capture_cart_prices:
+                        cart_record = await self._capture_cart_price_for_product(
+                            page,
+                            product,
+                            name.strip() if name else "",
+                            None,
+                            location,
+                            category,
+                        )
+                        if cart_record:
+                            prices.append(cart_record)
+                        await self._wait_with_jitter(1000, 2000)
             except Exception as e:
                 logger.warning(
                     "product_extraction_failed",
@@ -590,3 +639,258 @@ class PanagoAutomation:
         delay = random.uniform(min_delay, max_delay) / 1000
         logger.debug("waiting", delay_seconds=f"{delay:.1f}")
         await asyncio.sleep(delay)
+
+    # Cart interaction methods for menu vs cart price comparison
+
+    async def _click_product(self, page: Page, product_locator) -> bool:
+        """Click a product card to open the product detail modal.
+
+        Args:
+            page: Playwright page instance.
+            product_locator: Locator for the product element.
+
+        Returns:
+            True if modal opened successfully, False otherwise.
+        """
+        try:
+            await product_locator.click()
+            await asyncio.sleep(1)
+
+            # Wait for modal to appear
+            modal_selector = self.CART_SELECTORS["product_modal"]
+            try:
+                await page.wait_for_selector(modal_selector, state="visible", timeout=5000)
+                logger.debug("product_modal_opened")
+                return True
+            except Exception:
+                logger.debug("product_modal_not_found")
+                return False
+        except Exception as e:
+            logger.warning("click_product_failed", error=str(e))
+            return False
+
+    async def _select_size(self, page: Page, size: Optional[str]) -> bool:
+        """Select a size option in the product modal.
+
+        Args:
+            page: Playwright page instance.
+            size: Size to select (e.g., "Large", "Medium"). If None, selects first available.
+
+        Returns:
+            True if size was selected, False otherwise.
+        """
+        try:
+            size_selector = self.CART_SELECTORS["size_option"]
+            size_options = page.locator(size_selector)
+            count = await size_options.count()
+
+            if count == 0:
+                logger.debug("no_size_options_found")
+                return True  # Product may not have size options
+
+            if size:
+                # Try to find matching size
+                for i in range(count):
+                    option = size_options.nth(i)
+                    text = await option.text_content()
+                    if text and size.lower() in text.lower():
+                        await option.click()
+                        await asyncio.sleep(0.5)
+                        logger.debug("size_selected", size=size)
+                        return True
+
+            # Fallback: click first option
+            await size_options.first.click()
+            await asyncio.sleep(0.5)
+            logger.debug("size_selected_first_option")
+            return True
+
+        except Exception as e:
+            logger.warning("select_size_failed", error=str(e))
+            return False
+
+    async def _add_to_cart(self, page: Page) -> bool:
+        """Click the Add to Cart button in the product modal.
+
+        Args:
+            page: Playwright page instance.
+
+        Returns:
+            True if item was added to cart, False otherwise.
+        """
+        try:
+            button_selector = self.CART_SELECTORS["add_to_cart_button"]
+            add_button = page.locator(button_selector).first
+
+            if await add_button.is_visible():
+                await add_button.click()
+                await asyncio.sleep(2)  # Wait for cart to update
+                logger.debug("added_to_cart")
+                return True
+
+            logger.debug("add_to_cart_button_not_visible")
+            return False
+
+        except Exception as e:
+            logger.warning("add_to_cart_failed", error=str(e))
+            return False
+
+    async def _get_cart_price(self, page: Page, product_name: str) -> Optional[Decimal]:
+        """Open the cart and extract the price for a specific product.
+
+        Args:
+            page: Playwright page instance.
+            product_name: Name of the product to find in cart.
+
+        Returns:
+            Price as Decimal if found, None otherwise.
+        """
+        try:
+            # Try to open cart sidebar if needed
+            cart_icon = page.locator(self.CART_SELECTORS["cart_icon"]).first
+            if await cart_icon.is_visible():
+                await cart_icon.click()
+                await asyncio.sleep(1)
+
+            # Find cart items
+            cart_items = page.locator(self.CART_SELECTORS["cart_item"])
+            count = await cart_items.count()
+
+            for i in range(count):
+                item = cart_items.nth(i)
+                name_elem = item.locator(self.CART_SELECTORS["cart_item_name"])
+                price_elem = item.locator(self.CART_SELECTORS["cart_item_price"])
+
+                if await name_elem.count() > 0:
+                    name = await name_elem.first.text_content()
+                    if name and product_name.lower() in name.lower():
+                        if await price_elem.count() > 0:
+                            price_text = await price_elem.first.text_content()
+                            price = self._parse_price(price_text)
+                            logger.debug("cart_price_found", product=product_name, price=str(price))
+                            return price
+
+            logger.debug("cart_price_not_found", product=product_name)
+            return None
+
+        except Exception as e:
+            logger.warning("get_cart_price_failed", product=product_name, error=str(e))
+            return None
+
+    async def _clear_cart(self, page: Page) -> None:
+        """Remove all items from the shopping cart.
+
+        Args:
+            page: Playwright page instance.
+        """
+        try:
+            # First try clear cart button if available
+            clear_btn = page.locator(self.CART_SELECTORS["clear_cart"])
+            if await clear_btn.count() > 0 and await clear_btn.first.is_visible():
+                await clear_btn.first.click()
+                await asyncio.sleep(1)
+                logger.debug("cart_cleared_via_button")
+                return
+
+            # Otherwise remove items one by one
+            max_attempts = 20  # Prevent infinite loop
+            for _ in range(max_attempts):
+                remove_buttons = page.locator(self.CART_SELECTORS["remove_item"])
+                if await remove_buttons.count() == 0:
+                    break
+                await remove_buttons.first.click()
+                await asyncio.sleep(0.5)
+
+            logger.debug("cart_cleared_items_removed")
+
+        except Exception as e:
+            logger.warning("clear_cart_failed", error=str(e))
+
+    async def _close_modal(self, page: Page) -> None:
+        """Close any open modal dialog.
+
+        Args:
+            page: Playwright page instance.
+        """
+        try:
+            close_selector = self.CART_SELECTORS["close_modal"]
+            close_btn = page.locator(close_selector).first
+
+            if await close_btn.is_visible():
+                await close_btn.click()
+                await asyncio.sleep(0.5)
+                logger.debug("modal_closed")
+
+        except Exception as e:
+            logger.debug("close_modal_skipped", error=str(e))
+
+    async def _capture_cart_price_for_product(
+        self,
+        page: Page,
+        product_locator,
+        product_name: str,
+        size: Optional[str],
+        location: LocationConfig,
+        category: str,
+    ) -> Optional[PriceRecord]:
+        """Capture price from cart for a single product.
+
+        Flow: click product -> select size -> add to cart -> read price -> clear cart -> close modal
+
+        Args:
+            page: Playwright page instance.
+            product_locator: Locator for the product card element.
+            product_name: Name of the product.
+            size: Size variant to select (if applicable).
+            location: Current location configuration.
+            category: Product category.
+
+        Returns:
+            PriceRecord with cart price, or None if capture failed.
+        """
+        try:
+            # Open product modal
+            if not await self._click_product(page, product_locator):
+                return None
+
+            # Select size if applicable
+            await self._select_size(page, size)
+
+            # Add to cart
+            if not await self._add_to_cart(page):
+                await self._close_modal(page)
+                return None
+
+            # Get price from cart
+            cart_price = await self._get_cart_price(page, product_name)
+
+            # Clear cart for next product
+            await self._clear_cart(page)
+
+            # Close any open modals
+            await self._close_modal(page)
+
+            if cart_price is not None:
+                return PriceRecord(
+                    province=location.province,
+                    store_name=location.store_name,
+                    category=category,
+                    product_name=product_name,
+                    actual_price=cart_price,
+                    raw_price_text=f"${cart_price}",
+                    size=size,
+                    price_source=PriceSource.CART,
+                )
+
+            return None
+
+        except Exception as e:
+            logger.warning(
+                "cart_price_capture_failed",
+                product=product_name,
+                error=str(e),
+            )
+            # Try to clean up
+            await self._clear_cart(page)
+            await self._close_modal(page)
+            return None
