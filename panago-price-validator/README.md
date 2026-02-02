@@ -2,7 +2,52 @@
 
 Automated pricing validation tool for Panago.com. Compares product prices across all Canadian provinces against Marketing's expected pricing spreadsheet.
 
-## Installation
+## Quick Start with Docker (Recommended)
+
+The easiest way to run the validator:
+
+```sh
+# Start the web UI
+docker compose up
+
+# Open http://localhost:8080 in your browser
+```
+
+That's it. The web UI lets you:
+- Select cities to validate
+- Run price comparisons
+- Download results as Excel
+- Manage cities via Admin (/admin)
+
+### Docker Commands
+
+```sh
+# Start web UI (default)
+docker compose up
+
+# Run in background
+docker compose up -d
+
+# Stop
+docker compose down
+
+# Rebuild after code changes
+docker compose up --build
+```
+
+### Files and Folders
+
+| Path | Purpose |
+|------|---------|
+| `input/expected_prices.xlsx` | Your expected prices spreadsheet |
+| `output/` | Results are saved here |
+| `config/locations.yaml` | City configuration (editable via Admin UI) |
+
+---
+
+## Manual Installation (Alternative)
+
+If you prefer running without Docker:
 
 ```sh
 # Create virtual environment
@@ -16,7 +61,7 @@ pip install -r requirements.txt
 playwright install chromium
 ```
 
-## Quick Start
+## CLI Usage
 
 ```sh
 # Run against QA environment (default, recommended)

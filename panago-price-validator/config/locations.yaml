@@ -1,65 +1,54 @@
 # Test cities for each province
-# The Panago website uses a city picker - enter just the city name (no province)
+# The Panago website uses a city picker - enter just the city name
+# Manage these through the Admin UI at /admin
 
 provinces:
-  BC:
-    - city: "Vancouver"
-      store_name: "Vancouver"
-    - city: "Victoria"
-      store_name: "Victoria"
-    - city: "Surrey"
-      store_name: "Surrey"
-
-  AB:
-    - city: "Calgary"
-      store_name: "Calgary"
-    - city: "Edmonton"
-      store_name: "Edmonton"
-
-  SK:
-    - city: "Saskatoon"
-      store_name: "Saskatoon"
-    - city: "Regina"
-      store_name: "Regina"
-
-  MB:
-    - city: "Winnipeg"
-      store_name: "Winnipeg"
-
-  ON:
-    - city: "Toronto"
-      store_name: "Toronto"
-    - city: "Ottawa"
-      store_name: "Ottawa"
-    - city: "Mississauga"
-      store_name: "Mississauga"
-
-  QC:
-    - city: "Montreal"
-      store_name: "Montreal"
-
-  NB:
-    - city: "Fredericton"
-      store_name: "Fredericton"
-
-  NS:
-    - city: "Halifax"
-      store_name: "Halifax"
-
-  PE:
-    - city: "Charlottetown"
-      store_name: "Charlottetown"
-
-  NL:
-    - city: "St. John's"
-      store_name: "St. John's"
-
-# Product categories to validate
-# These should match the category identifiers on panago.com
+  "BC":
+  - city: Vancouver
+    store_name: Vancouver
+  - city: Victoria
+    store_name: Victoria
+  - city: Surrey
+    store_name: Surrey
+  "AB":
+  - city: Calgary
+    store_name: Calgary
+  - city: Edmonton
+    store_name: Edmonton
+  "SK":
+  - city: Saskatoon
+    store_name: Saskatoon
+  - city: Regina
+    store_name: Regina
+  "MB":
+  - city: Winnipeg
+    store_name: Winnipeg
+  "ON":
+  - city: Toronto
+    store_name: Toronto
+  - city: Ottawa
+    store_name: Ottawa
+  - city: Mississauga
+    store_name: Mississauga
+  "QC":
+  - city: Montreal
+    store_name: Montreal
+  "NB":
+  - city: Fredericton
+    store_name: Fredericton
+  "NS":
+  - city: Halifax
+    store_name: Halifax
+  "PE":
+  - city: Charlottetown
+    store_name: Charlottetown
+  "NL":
+  - city: St. John's
+    store_name: St. John's
 categories:
-  - pizzas
-  - salads
-  - sides
-  - dips
-  - desserts
-  - beverages
+- pizzas
+- salads
+- sides
+- dips
+- desserts
+- beverages

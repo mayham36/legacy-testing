@@ -1,12 +1,13 @@
 """FastAPI web application for Panago Price Validator."""
 import asyncio
+import re
 import uuid
 from pathlib import Path
 from typing import Optional
 
 import yaml
 from fastapi import FastAPI, Request, BackgroundTasks
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -46,7 +47,55 @@ def load_cities_from_config() -> dict[str, list[dict]]:
     with open(locations_path) as f:
         data = yaml.safe_load(f)
 
-    return data.get("provinces", {})
+    provinces = data.get("provinces", {})
+
+    # Fix boolean keys that YAML interprets from ON/NO/etc.
+    fixed_provinces = {}
+    for code, cities in provinces.items():
+        if isinstance(code, bool):
+            code = "ON" if code else "NO"
+        fixed_provinces[str(code)] = cities
+
+    return fixed_provinces
+
+
+class QuotedString(str):
+    """String subclass that forces YAML to quote the value."""
+    pass
+
+
+def quoted_str_representer(dumper, data):
+    """Custom representer to force quoting of strings."""
+    return dumper.represent_scalar('tag:yaml.org,2002:str', data, style='"')
+
+
+yaml.add_representer(QuotedString, quoted_str_representer)
+
+
+def save_cities_to_config(provinces: dict[str, list[dict]]) -> None:
+    """Save cities to locations.yaml, preserving other config like categories."""
+    locations_path = CONFIG_DIR / "locations.yaml"
+
+    # Load existing config to preserve other sections (like categories)
+    existing_data = {}
+    if locations_path.exists():
+        with open(locations_path) as f:
+            existing_data = yaml.safe_load(f) or {}
+
+    # Quote province codes that YAML might interpret as booleans (ON, NO, etc.)
+    # See: https://yaml.org/type/bool.html
+    quoted_provinces = {}
+    for code, cities in provinces.items():
+        # Convert boolean keys back to strings (in case they were loaded as bool)
+        if isinstance(code, bool):
+            code = "ON" if code else "NO"
+        quoted_provinces[QuotedString(code)] = cities
+
+    # Update provinces section
+    existing_data["provinces"] = quoted_provinces
+
+    with open(locations_path, "w") as f:
+        yaml.dump(existing_data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -265,3 +314,126 @@ async def download_latest():
         filename=latest_file.name,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
+
+
+# Admin routes for city configuration
+
+
+@app.get("/admin", response_class=HTMLResponse)
+async def admin_page(request: Request):
+    """Render the admin page for managing cities."""
+    provinces = load_cities_from_config()
+    return templates.TemplateResponse(
+        "admin.html",
+        {
+            "request": request,
+            "provinces": provinces,
+        }
+    )
+
+
+@app.post("/admin/cities")
+async def add_city(request: Request):
+    """Add a new city to a province."""
+    form_data = await request.form()
+    province = form_data.get("province", "").strip().upper()
+    city = form_data.get("city", "").strip()
+    store_name = form_data.get("store_name", "").strip() or city
+
+    # Validate province code (2 letters)
+    if not province or not re.match(r"^[A-Z]{2}$", province):
+        return JSONResponse(
+            {"error": "Province must be a 2-letter code (e.g., BC, ON)"},
+            status_code=400
+        )
+
+    if not city:
+        return JSONResponse({"error": "City name is required"}, status_code=400)
+
+    provinces = load_cities_from_config()
+
+    # Initialize province if it doesn't exist
+    if province not in provinces:
+        provinces[province] = []
+
+    # Check for duplicate city
+    for existing_city in provinces[province]:
+        if existing_city["city"].lower() == city.lower():
+            return JSONResponse(
+                {"error": f"City '{city}' already exists in {province}"},
+                status_code=400
+            )
+
+    # Add the city
+    provinces[province].append({"city": city, "store_name": store_name})
+    save_cities_to_config(provinces)
+
+    return {"success": True, "message": f"Added {city} to {province}"}
+
+
+@app.delete("/admin/cities/{province}/{city}")
+async def delete_city(province: str, city: str):
+    """Remove a city from a province."""
+    province = province.upper()
+    provinces = load_cities_from_config()
+
+    if province not in provinces:
+        return JSONResponse({"error": f"Province '{province}' not found"}, status_code=404)
+
+    # Find and remove the city
+    original_count = len(provinces[province])
+    provinces[province] = [c for c in provinces[province] if c["city"] != city]
+
+    if len(provinces[province]) == original_count:
+        return JSONResponse({"error": f"City '{city}' not found in {province}"}, status_code=404)
+
+    save_cities_to_config(provinces)
+    return {"success": True, "message": f"Removed {city} from {province}"}
+
+
+@app.post("/admin/provinces")
+async def add_province(request: Request):
+    """Add a new province."""
+    form_data = await request.form()
+    province = form_data.get("province", "").strip().upper()
+
+    # Validate province code (2 letters)
+    if not province or not re.match(r"^[A-Z]{2}$", province):
+        return JSONResponse(
+            {"error": "Province must be a 2-letter code (e.g., BC, ON)"},
+            status_code=400
+        )
+
+    provinces = load_cities_from_config()
+
+    if province in provinces:
+        return JSONResponse(
+            {"error": f"Province '{province}' already exists"},
+            status_code=400
+        )
+
+    provinces[province] = []
+    save_cities_to_config(provinces)
+
+    return {"success": True, "message": f"Added province {province}"}
+
+
+@app.delete("/admin/provinces/{province}")
+async def delete_province(province: str):
+    """Delete an empty province."""
+    province = province.upper()
+    provinces = load_cities_from_config()
+
+    if province not in provinces:
+        return JSONResponse({"error": f"Province '{province}' not found"}, status_code=404)
+
+    if provinces[province]:
+        return JSONResponse(
+            {"error": f"Cannot delete province '{province}' - it still has cities. Remove all cities first."},
+            status_code=400
+        )
+
+    del provinces[province]
+    save_cities_to_config(provinces)
+
+    return {"success": True, "message": f"Removed province {province}"}
