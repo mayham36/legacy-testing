@@ -51,8 +51,17 @@ def compare_prices(
     if "expected_price" in expected_df.columns:
         expected_df = expected_df.rename(columns={"expected_price": "expected_price"})
 
-    # Determine merge keys based on whether size column exists
-    merge_keys = ["product_name", "category", "province"]
+    # Determine merge keys based on available columns
+    # Support both old format (province) and new format (pricing_level)
+    merge_keys = ["product_name", "category"]
+
+    # Use pricing_level if available in both, otherwise try province
+    if "pricing_level" in expected_df.columns and "pricing_level" in actual_df.columns:
+        merge_keys.append("pricing_level")
+    elif "province" in expected_df.columns and "province" in actual_df.columns:
+        merge_keys.append("province")
+    # If neither matches, just merge on product_name and category
+
     if "size" in actual_df.columns:
         # Add size to merge keys if present (for products with size variants)
         merge_keys.append("size")
@@ -103,8 +112,9 @@ def compare_prices(
     summary_df = pd.DataFrame([summary])
     discrepancies_df = merged[merged["status"] != ValidationStatus.PASS].copy()
 
-    # Clean up output columns
+    # Clean up output columns - include both province and pricing_level
     output_columns = [
+        "pricing_level",
         "province",
         "store_name",
         "category",
@@ -162,6 +172,7 @@ def _create_empty_results(message: str) -> dict:
         Dictionary with empty DataFrames and summary.
     """
     output_columns = [
+        "pricing_level",
         "province",
         "store_name",
         "category",
@@ -256,8 +267,12 @@ def compare_menu_vs_cart(
     if cart_df.empty:
         return _create_empty_menu_vs_cart_results("No cart prices found")
 
-    # Merge on product identifiers
-    merge_keys = ["product_name", "province", "store_name", "category"]
+    # Merge on product identifiers - use pricing_level if available, otherwise province
+    merge_keys = ["product_name", "store_name", "category"]
+    if "pricing_level" in menu_df.columns and "pricing_level" in cart_df.columns:
+        merge_keys.append("pricing_level")
+    if "province" in menu_df.columns and "province" in cart_df.columns:
+        merge_keys.append("province")
     if "size" in menu_df.columns and "size" in cart_df.columns:
         merge_keys.append("size")
 
@@ -282,8 +297,9 @@ def compare_menu_vs_cart(
     matched = merged["prices_match"].sum()
     mismatched = total_compared - matched
 
-    # Select output columns
+    # Select output columns - include pricing_level if present
     output_columns = [
+        "pricing_level",
         "province",
         "store_name",
         "category",
@@ -326,6 +342,7 @@ def _create_empty_menu_vs_cart_results(message: str) -> dict:
         Dictionary with empty DataFrames and summary.
     """
     output_columns = [
+        "pricing_level",
         "province",
         "store_name",
         "category",
@@ -390,22 +407,43 @@ def compare_all_prices(
     expected_df = expected_df.copy()
     expected_df.columns = expected_df.columns.str.lower().str.strip()
 
-    # Determine merge keys
-    merge_keys = ["product_name", "category", "province"]
+    # Determine merge keys - use pricing_level if available, otherwise province
+    merge_keys = ["product_name", "category"]
+
+    # Check which location identifier to use
+    if "pricing_level" in expected_df.columns and "pricing_level" in menu_df.columns:
+        merge_keys.append("pricing_level")
+    elif "province" in expected_df.columns and "province" in menu_df.columns:
+        merge_keys.append("province")
+
     if "size" in menu_df.columns:
         merge_keys.append("size")
         if "size" not in expected_df.columns:
             expected_df["size"] = None
 
+    # Determine which columns to include from menu_df
+    menu_cols = merge_keys.copy()
+    if "store_name" in menu_df.columns:
+        menu_cols.append("store_name")
+    if "province" in menu_df.columns and "province" not in menu_cols:
+        menu_cols.append("province")
+    if "pricing_level" in menu_df.columns and "pricing_level" not in menu_cols:
+        menu_cols.append("pricing_level")
+    menu_cols.append("menu_price")
+
     # Start with menu prices as the base
-    result_df = menu_df[merge_keys + ["store_name", "menu_price"]].copy()
+    result_df = menu_df[[c for c in menu_cols if c in menu_df.columns]].copy()
+
+    # Determine expected columns for merge
+    expected_merge_cols = [c for c in merge_keys if c in expected_df.columns]
+    expected_merge_cols.append("expected_price")
 
     # Merge with expected prices
     if not expected_df.empty:
         result_df = pd.merge(
             result_df,
-            expected_df[merge_keys + ["expected_price"]],
-            on=merge_keys,
+            expected_df[[c for c in expected_merge_cols if c in expected_df.columns]],
+            on=[c for c in merge_keys if c in expected_df.columns],
             how="left",
         )
     else:
@@ -455,8 +493,9 @@ def compare_all_prices(
 
     result_df["status"] = result_df.apply(get_status, axis=1)
 
-    # Reorder columns for clarity
+    # Reorder columns for clarity - include both province and pricing_level if present
     output_columns = [
+        "pricing_level",
         "province",
         "store_name",
         "category",
@@ -490,6 +529,7 @@ def compare_all_prices(
 def _create_empty_all_prices_results(message: str) -> dict:
     """Create empty results for all-prices comparison."""
     output_columns = [
+        "pricing_level",
         "province",
         "store_name",
         "category",
