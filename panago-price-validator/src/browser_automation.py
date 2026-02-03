@@ -1149,7 +1149,7 @@ class PanagoAutomation:
             try:
                 element_text = await product_locator.text_content(timeout=1000)
                 element_text = element_text[:80] if element_text else "no text"
-            except:
+            except Exception:
                 element_text = "could not get text"
             logger.debug("processing_product", element_preview=element_text)
 
@@ -1225,7 +1225,7 @@ class PanagoAutomation:
                             logger.debug("size_selected", size=size, pattern=pattern)
                             await asyncio.sleep(0.3)
                             return True
-                    except:
+                    except Exception:
                         continue
 
             # Fallback: try generic size selector
@@ -1306,7 +1306,7 @@ class PanagoAutomation:
                         await asyncio.sleep(1)  # Wait for cart to update
                         logger.debug("added_to_cart")
                         return True
-                except:
+                except Exception:
                     continue
 
             logger.debug("add_to_cart_button_not_found")
@@ -1536,6 +1536,6 @@ class PanagoAutomation:
                 await self._close_modal(page)
                 if page.url != original_url:
                     await page.goto(full_category_url, wait_until="domcontentloaded", timeout=10000)
-            except:
+            except Exception:
                 pass
             return None

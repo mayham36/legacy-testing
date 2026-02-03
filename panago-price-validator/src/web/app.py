@@ -1,6 +1,7 @@
 """FastAPI web application for Panago Price Validator."""
 import asyncio
 import json
+import os
 import re
 import uuid
 from datetime import datetime
@@ -8,8 +9,9 @@ from pathlib import Path
 from typing import Optional
 
 import yaml
-from fastapi import FastAPI, Request, BackgroundTasks, UploadFile, File
+from fastapi import Depends, FastAPI, HTTPException, Request, BackgroundTasks, Security, UploadFile, File
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.security import APIKeyHeader
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -21,6 +23,21 @@ from ..config_loader import load_settings
 from ..master_parser import MasterDocumentParser, load_master_document
 
 app = FastAPI(title="Panago Price Validator", version="1.0.0")
+
+# API Key authentication
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+async def verify_api_key(api_key: str = Security(api_key_header)):
+    """Verify API key for protected endpoints."""
+    expected_key = os.getenv("PANAGO_API_KEY")
+    if not expected_key:
+        # No key configured = auth disabled (for local dev)
+        return None
+    if api_key != expected_key:
+        raise HTTPException(status_code=403, detail="Invalid or missing API key")
+    return api_key
+
 
 # Setup paths
 BASE_DIR = Path(__file__).parent
@@ -42,6 +59,7 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 # Job tracking
 jobs: dict[str, dict] = {}
+jobs_lock = asyncio.Lock()
 
 
 def load_cities_from_config() -> dict[str, list[dict]]:
@@ -160,7 +178,7 @@ async def index(request: Request):
 
 
 @app.post("/run")
-async def run_validation(request: Request, background_tasks: BackgroundTasks):
+async def run_validation(request: Request, background_tasks: BackgroundTasks, user: str = Depends(verify_api_key)):
     """Start a validation run for selected cities."""
     form_data = await request.form()
     selected_cities = form_data.getlist("cities")
@@ -171,15 +189,16 @@ async def run_validation(request: Request, background_tasks: BackgroundTasks):
 
     # Create job ID
     job_id = str(uuid.uuid4())[:8]
-    jobs[job_id] = {
-        "status": "pending",
-        "progress": 0,
-        "message": "Starting...",
-        "cities": selected_cities,
-        "capture_cart": capture_cart,
-        "result_file": None,
-        "error": None,
-    }
+    async with jobs_lock:
+        jobs[job_id] = {
+            "status": "pending",
+            "progress": 0,
+            "message": "Starting...",
+            "cities": selected_cities,
+            "capture_cart": capture_cart,
+            "result_file": None,
+            "error": None,
+        }
 
     # Start background task
     background_tasks.add_task(run_validation_task, job_id, selected_cities, capture_cart)
@@ -187,15 +206,18 @@ async def run_validation(request: Request, background_tasks: BackgroundTasks):
     return {"job_id": job_id, "status": "started"}
 
 
+async def update_job(job_id: str, **updates):
+    """Helper to update job state under the lock."""
+    async with jobs_lock:
+        if job_id in jobs:
+            jobs[job_id].update(updates)
+
+
 async def run_validation_task(job_id: str, selected_cities: list[str], capture_cart: bool = False):
     """Background task to run the validation."""
-    job = jobs[job_id]
+    await update_job(job_id, status="running", message="Loading configuration...", progress=5)
 
     try:
-        job["status"] = "running"
-        job["message"] = "Loading configuration..."
-        job["progress"] = 5
-
         # Parse selected cities (format: "PL:city" for pricing levels)
         locations: list[LocationConfig] = []
         pricing_levels_config = load_pricing_levels()
@@ -226,8 +248,7 @@ async def run_validation_task(job_id: str, selected_cities: list[str], capture_c
                     break
 
         cart_mode_text = " (with cart comparison)" if capture_cart else ""
-        job["message"] = f"Validating {len(locations)} location(s){cart_mode_text}..."
-        job["progress"] = 10
+        await update_job(job_id, message=f"Validating {len(locations)} location(s){cart_mode_text}...", progress=10)
 
         # Load settings
         settings_path = CONFIG_DIR / "settings.yaml"
@@ -254,12 +275,15 @@ async def run_validation_task(job_id: str, selected_cities: list[str], capture_c
             timeout_ms=30000,
         )
 
-        job["message"] = "Starting browser automation..."
-        job["progress"] = 15
+        await update_job(job_id, message="Starting browser automation...", progress=15)
 
         # Progress callback to update job status in real-time
+        async def update_progress_async(message: str):
+            await update_job(job_id, message=message)
+
         def update_progress(message: str):
-            job["message"] = message
+            # Schedule the async update (fire-and-forget for progress updates)
+            asyncio.create_task(update_progress_async(message))
 
         # Create automation instance
         automation = PanagoAutomation(
@@ -277,14 +301,12 @@ async def run_validation_task(job_id: str, selected_cities: list[str], capture_c
 
         # Run collection (this is the long part)
         cart_note = " (including cart prices - this may take a while)" if capture_cart else ""
-        job["message"] = f"Collecting prices from {len(locations)} location(s){cart_note}..."
-        job["progress"] = 20
+        await update_job(job_id, message=f"Collecting prices from {len(locations)} location(s){cart_note}...", progress=20)
 
         # Run async collection
         actual_prices = await automation._run_async()
 
-        job["message"] = f"Collected {len(actual_prices)} prices. Comparing..."
-        job["progress"] = 80
+        await update_job(job_id, message=f"Collected {len(actual_prices)} prices. Comparing...", progress=80)
 
         # Load expected prices from master document or fallback to old format
         master_path = get_current_master_path()
@@ -292,7 +314,7 @@ async def run_validation_task(job_id: str, selected_cities: list[str], capture_c
         expected_df = None
 
         if master_path:
-            job["message"] = "Loading expected prices from master document..."
+            await update_job(job_id, message="Loading expected prices from master document...")
             expected_prices_list = load_master_document(master_path)
             # Convert to DataFrame for comparison
             import pandas as pd
@@ -321,18 +343,15 @@ async def run_validation_task(job_id: str, selected_cities: list[str], capture_c
         menu_vs_cart_results = None
         all_prices_results = None
         if capture_cart:
-            job["message"] = "Comparing menu vs cart prices..."
-            job["progress"] = 85
+            await update_job(job_id, message="Comparing menu vs cart prices...", progress=85)
             menu_vs_cart_results = compare_menu_vs_cart(actual_prices, tolerance=0.01)
 
             # Create comprehensive comparison with all three prices
             if expected_df is not None and not expected_df.empty:
-                job["message"] = "Creating comprehensive price comparison..."
-                job["progress"] = 88
+                await update_job(job_id, message="Creating comprehensive price comparison...", progress=88)
                 all_prices_results = compare_all_prices(expected_df, actual_prices, tolerance=0.01)
 
-        job["message"] = "Saving results..."
-        job["progress"] = 90
+        await update_job(job_id, message="Saving results...", progress=90)
 
         # Save results
         output_path = save_results(
@@ -349,25 +368,27 @@ async def run_validation_task(job_id: str, selected_cities: list[str], capture_c
         elif menu_vs_cart_results:
             summary_parts.append(menu_vs_cart_results['summary'])
 
-        job["status"] = "completed"
-        job["message"] = f"Complete! {' | '.join(summary_parts)}"
-        job["progress"] = 100
-        job["result_file"] = str(output_path)
+        await update_job(
+            job_id,
+            status="completed",
+            message=f"Complete! {' | '.join(summary_parts)}",
+            progress=100,
+            result_file=str(output_path)
+        )
 
     except Exception as e:
         import traceback
         traceback.print_exc()
-        job["status"] = "error"
-        job["message"] = f"Error: {str(e)}"
-        job["error"] = str(e)
+        await update_job(job_id, status="error", message=f"Error: {str(e)}", error=str(e))
 
 
 @app.get("/status/{job_id}")
 async def get_status(job_id: str):
     """Get the status of a validation job."""
-    if job_id not in jobs:
-        return {"error": "Job not found", "status": "error"}
-    return jobs[job_id]
+    async with jobs_lock:
+        if job_id not in jobs:
+            return {"error": "Job not found", "status": "error"}
+        return jobs[job_id].copy()
 
 
 @app.get("/stream/{job_id}")
@@ -375,12 +396,12 @@ async def stream_status(job_id: str):
     """SSE endpoint for real-time progress updates."""
     async def event_generator():
         while True:
-            if job_id not in jobs:
-                yield f"data: {{'error': 'Job not found'}}\n\n"
-                break
+            async with jobs_lock:
+                if job_id not in jobs:
+                    yield f"data: {{'error': 'Job not found'}}\n\n"
+                    break
+                job = jobs[job_id].copy()
 
-            job = jobs[job_id]
-            import json
             yield f"data: {json.dumps(job)}\n\n"
 
             if job["status"] in ("completed", "error"):
@@ -401,17 +422,23 @@ async def stream_status(job_id: str):
 @app.get("/download/{job_id}")
 async def download_results(job_id: str):
     """Download the results Excel file."""
-    if job_id not in jobs:
-        return {"error": "Job not found"}
+    async with jobs_lock:
+        if job_id not in jobs:
+            return {"error": "Job not found"}
+        job = jobs[job_id].copy()
 
-    job = jobs[job_id]
     if job["status"] != "completed":
         return {"error": "Job not complete"}
 
     if not job["result_file"]:
         return {"error": "No result file"}
 
-    file_path = Path(job["result_file"])
+    file_path = Path(job["result_file"]).resolve()
+
+    # Validate path is within OUTPUT_DIR to prevent path traversal
+    if not file_path.is_relative_to(OUTPUT_DIR.resolve()):
+        return {"error": "Invalid file path"}
+
     if not file_path.exists():
         return {"error": "Result file not found"}
 
@@ -443,7 +470,7 @@ async def download_latest():
 
 
 @app.post("/upload-master")
-async def upload_master(file: UploadFile = File(...)):
+async def upload_master(file: UploadFile = File(...), user: str = Depends(verify_api_key)):
     """Upload and parse a master pricing document."""
     # Validate file type
     if not file.filename or not file.filename.endswith(('.xls', '.xlsx')):
@@ -452,11 +479,22 @@ async def upload_master(file: UploadFile = File(...)):
             status_code=400
         )
 
-    # Save the uploaded file
+    # Save the uploaded file with path traversal protection
+    # Extract just the filename (removes any path components)
+    raw_filename = Path(file.filename).name if file.filename else "unnamed"
+    safe_filename = re.sub(r'[^\w\-_.]', '_', raw_filename)
+
+    # Ensure no empty/hidden filename
+    if not safe_filename or safe_filename.startswith('.'):
+        safe_filename = f"upload_{uuid.uuid4().hex[:8]}"
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    safe_filename = re.sub(r'[^\w\-_.]', '_', file.filename)
     filename = f"master_{timestamp}_{safe_filename}"
-    file_path = UPLOAD_DIR / filename
+    file_path = (UPLOAD_DIR / filename).resolve()
+
+    # CRITICAL: Validate path is within UPLOAD_DIR
+    if not file_path.is_relative_to(UPLOAD_DIR.resolve()):
+        raise HTTPException(status_code=400, detail="Invalid filename")
 
     try:
         content = await file.read()
@@ -527,7 +565,7 @@ async def admin_page(request: Request):
 
 
 @app.post("/admin/cities")
-async def add_city(request: Request):
+async def add_city(request: Request, user: str = Depends(verify_api_key)):
     """Add a new city to a province."""
     form_data = await request.form()
     province = form_data.get("province", "").strip().upper()
@@ -566,7 +604,7 @@ async def add_city(request: Request):
 
 
 @app.delete("/admin/cities/{province}/{city}")
-async def delete_city(province: str, city: str):
+async def delete_city(province: str, city: str, user: str = Depends(verify_api_key)):
     """Remove a city from a province."""
     province = province.upper()
     provinces = load_cities_from_config()
@@ -586,7 +624,7 @@ async def delete_city(province: str, city: str):
 
 
 @app.post("/admin/provinces")
-async def add_province(request: Request):
+async def add_province(request: Request, user: str = Depends(verify_api_key)):
     """Add a new province."""
     form_data = await request.form()
     province = form_data.get("province", "").strip().upper()
@@ -613,7 +651,7 @@ async def add_province(request: Request):
 
 
 @app.delete("/admin/provinces/{province}")
-async def delete_province(province: str):
+async def delete_province(province: str, user: str = Depends(verify_api_key)):
     """Delete an empty province."""
     province = province.upper()
     provinces = load_cities_from_config()
