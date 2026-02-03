@@ -1,5 +1,6 @@
 """Playwright browser automation with parallel execution."""
 import asyncio
+import json
 import random
 import re
 from datetime import datetime
@@ -120,6 +121,27 @@ class PanagoAutomation:
         "close_modal": ".close, [class*='close'], button[aria-label='Close'], .modal-close",
     }
 
+    # Category-specific selectors - different page layouts need different selectors
+    CATEGORY_SELECTORS = {
+        "beverages": {
+            # Beverages may use a different layout (dropdowns, list format)
+            "product_card": ".beverage-item, .drink-option, [data-product-type='beverage'], .product-group, ul.products > li, .menu-item",
+            "product_name": ".beverage-name, .drink-name, .product-title h4, h4.product-title, .product-group-title, .menu-item-name",
+            "product_price": ".beverage-price, .drink-price, .product-header .price, .prices li span, .price, .menu-item-price",
+        },
+        "dips": {
+            # Dips often use qty-picker format with inline prices
+            "product_card": ".qty-picker, .product-group, ul.products > li",
+            "product_name": ".qty-picker label, .product-title h4, .product-group-title",
+            "product_price": ".qty-picker label span, .price",
+        },
+        "default": {
+            "product_card": "ul.products > li, .product-group",
+            "product_name": ".product-title h4, h4.product-title, .product-header h4, .product-group-title",
+            "product_price": ".product-header .price, .prices li span, .price",
+        },
+    }
+
     def __init__(
         self,
         config: AutomationConfig,
@@ -155,6 +177,145 @@ class PanagoAutomation:
         """Report progress via callback if available."""
         if self.progress_callback:
             self.progress_callback(message)
+
+    async def _save_debug_snapshot(
+        self, page: Page, context: str, location: Optional[LocationConfig] = None
+    ) -> None:
+        """Save page state for debugging when scraping fails.
+
+        Creates a timestamped debug directory with screenshot, HTML, and state JSON.
+
+        Args:
+            page: Playwright page instance.
+            context: Description of what was being done (e.g., "beverages", "location_fail_Calgary").
+            location: Optional location config for context.
+        """
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            debug_dir = Path("debug") / timestamp
+            debug_dir.mkdir(parents=True, exist_ok=True)
+
+            # Safe context name for filenames
+            safe_context = re.sub(r"[^a-zA-Z0-9_-]", "_", context)
+
+            # Screenshot
+            screenshot_path = debug_dir / f"{safe_context}_screenshot.png"
+            await page.screenshot(path=str(screenshot_path), full_page=True)
+
+            # HTML content
+            html_path = debug_dir / f"{safe_context}_page.html"
+            html = await page.content()
+            html_path.write_text(html, encoding="utf-8")
+
+            # State JSON
+            state = {
+                "url": page.url,
+                "context": context,
+                "location": {
+                    "store_name": location.store_name,
+                    "province": location.province,
+                    "pricing_level": str(location.get_pricing_level()),
+                } if location else None,
+                "timestamp": timestamp,
+                "page_title": await page.title(),
+            }
+            state_path = debug_dir / f"{safe_context}_state.json"
+            state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+            logger.info(
+                "debug_snapshot_saved",
+                path=str(debug_dir),
+                context=context,
+                screenshot=str(screenshot_path),
+            )
+            self._report_progress(f"📸 Debug snapshot saved: {debug_dir}")
+
+        except Exception as e:
+            logger.warning("debug_snapshot_failed", context=context, error=str(e))
+
+    def _get_category_selectors(self, category: str) -> dict:
+        """Get selectors for a specific category.
+
+        Args:
+            category: Category name.
+
+        Returns:
+            Dict of selectors for the category.
+        """
+        return self.CATEGORY_SELECTORS.get(category, self.CATEGORY_SELECTORS["default"])
+
+    async def _extract_product_name(self, product, selectors: dict) -> Optional[str]:
+        """Extract full product name using multiple strategies.
+
+        Tries category-specific selector first, then falls back to other methods
+        to ensure we capture the complete product name (not truncated).
+
+        Args:
+            product: Playwright locator for the product element.
+            selectors: Dict of selectors to use.
+
+        Returns:
+            Product name string or None if not found.
+        """
+        name = None
+
+        # Strategy 1: Try the category-specific name selector
+        name_selectors = [
+            selectors.get("product_name", ""),
+            ".product-title h4",
+            "h4.product-title",
+            ".product-name",
+            ".product-header h4",
+            ".product-group-title",
+            "h4",
+            "h3",
+        ]
+
+        for selector in name_selectors:
+            if not selector:
+                continue
+            try:
+                locator = product.locator(selector)
+                if await locator.count() > 0:
+                    text = await locator.first.text_content(timeout=3000)
+                    if text and len(text.strip()) > 2:
+                        name = text.strip()
+                        break
+            except Exception:
+                continue
+
+        # Strategy 2: If name is short or suspicious, try getting more text
+        if name and len(name) < 5:
+            # Name might be truncated - try to get full text from product card
+            try:
+                full_text = await product.text_content(timeout=3000)
+                if full_text:
+                    # Extract first meaningful line (product name is usually first)
+                    lines = [l.strip() for l in full_text.split("\n") if l.strip()]
+                    # Find first line that's not a price
+                    for line in lines:
+                        if not line.startswith("$") and not re.match(r"^\d+\.\d{2}$", line):
+                            if len(line) > len(name):
+                                name = line
+                            break
+            except Exception:
+                pass
+
+        # Strategy 3: If still no name, try full text extraction
+        if not name:
+            try:
+                full_text = await product.text_content(timeout=3000)
+                if full_text:
+                    # Extract first meaningful line
+                    lines = [l.strip() for l in full_text.split("\n") if l.strip()]
+                    for line in lines:
+                        if not line.startswith("$") and not re.match(r"^\d+\.\d{2}$", line):
+                            name = line
+                            break
+            except Exception:
+                pass
+
+        return name.strip() if name else None
 
     def run_price_collection(self) -> list[PriceRecord]:
         """Synchronous entry point - runs async collection.
@@ -468,7 +629,8 @@ class PanagoAutomation:
     ) -> list[PriceRecord]:
         """Scrape all products and prices from a category.
 
-        Includes delays to minimize site impact.
+        Includes delays to minimize site impact. Uses category-specific selectors
+        for different page layouts.
 
         Args:
             page: Playwright page instance.
@@ -493,25 +655,49 @@ class PanagoAutomation:
         except Exception as e:
             logger.warning("page_load_failed", url=full_url, error=str(e))
 
-        # Wait for page content to load
-        await asyncio.sleep(1)  # Give React time to render
+        # Wait for page content to load (extra time for JavaScript rendering)
+        await asyncio.sleep(2)  # Give React/JavaScript time to render
 
-        products = page.locator(self.SELECTORS["product_card"])
+        # Get category-specific selectors
+        cat_selectors = self._get_category_selectors(category)
+
+        # Try category-specific selector first, then fall back to default
+        products = page.locator(cat_selectors["product_card"])
         count = await products.count()
+
+        # If no products found with category selector, try default selector
+        if count == 0 and category in self.CATEGORY_SELECTORS:
+            default_selectors = self.CATEGORY_SELECTORS["default"]
+            products = page.locator(default_selectors["product_card"])
+            count = await products.count()
+            if count > 0:
+                cat_selectors = default_selectors
+                logger.info("using_fallback_selectors", category=category, count=count)
+
+        # Save debug snapshot if no products found
+        if count == 0:
+            logger.warning(
+                "no_products_found",
+                category=category,
+                url=page.url,
+                location=location.store_name,
+            )
+            self._report_progress(f"⚠️ No products found for {category}")
+            await self._save_debug_snapshot(page, f"no_products_{category}", location)
+            return []
+
+        logger.info("found_products", category=category, count=count)
+        self._report_progress(f"📦 Found {count} products in {category}")
 
         prices: list[PriceRecord] = []
         for i in range(count):
             product = products.nth(i)
             try:
-                # Use .first to handle multiple matching elements (strict mode)
-                # Add timeout to prevent long hangs on pages with different structure
-                name_locator = product.locator(self.SELECTORS["product_name"])
-                name = None
-                try:
-                    if await name_locator.count() > 0:
-                        name = await name_locator.first.text_content(timeout=5000)
-                except Exception:
-                    pass  # Skip if name not found
+                # Extract product name using category-specific selector
+                name = await self._extract_product_name(product, cat_selectors)
+                if not name:
+                    logger.debug("no_name_found", product_index=i, category=category)
+                    continue
 
                 # Check for products with multiple size/price variants (pizzas, etc.)
                 price_list_items = product.locator(self.SELECTORS["price_list_item"])
@@ -583,11 +769,12 @@ class PanagoAutomation:
 
                         # Re-fetch products locator after navigation
                         # (Playwright locators are lazy, but this ensures we're working with current DOM)
-                        products = page.locator(self.SELECTORS["product_card"])
+                        products = page.locator(cat_selectors["product_card"])
                         await asyncio.sleep(0.3)
                 else:
-                    # Single price or different format
-                    price_locator = product.locator(self.SELECTORS["product_price"])
+                    # Single price or different format - try category-specific selector first
+                    price_selector = cat_selectors.get("product_price", self.SELECTORS["product_price"])
+                    price_locator = product.locator(price_selector)
                     price_count = await price_locator.count()
                     price_text = None
 
@@ -639,7 +826,7 @@ class PanagoAutomation:
                             self._report_progress(f"⚠️ Could not get cart price")
 
                         # Re-fetch products locator after navigation
-                        products = page.locator(self.SELECTORS["product_card"])
+                        products = page.locator(cat_selectors["product_card"])
                         await asyncio.sleep(0.3)
             except Exception as e:
                 logger.warning(

@@ -1,10 +1,106 @@
 """Price comparison logic with bug fixes."""
+import re
 from decimal import Decimal
+from difflib import get_close_matches
 from typing import Optional
 
 import pandas as pd
 
 from .models import ValidationStatus, PriceRecord, PriceSource
+
+
+def normalize_product_name(name: str) -> str:
+    """Normalize product name for comparison.
+
+    Handles:
+    - Trailing/leading whitespace
+    - "NEW " prefix in master documents
+    - Multiple internal spaces
+    - Case normalization
+
+    Args:
+        name: Raw product name.
+
+    Returns:
+        Normalized product name (lowercase, stripped).
+    """
+    if pd.isna(name) or name is None:
+        return ""
+
+    name = str(name).strip()
+    name = " ".join(name.split())  # Normalize internal whitespace
+
+    # Remove common prefixes (case-insensitive)
+    prefixes_to_remove = ["NEW ", "new ", "New "]
+    for prefix in prefixes_to_remove:
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+
+    return name.lower()
+
+
+def find_best_match(
+    product_name: str,
+    candidates: list[str],
+    threshold: float = 0.8,
+) -> Optional[str]:
+    """Find best matching product name from candidates using fuzzy matching.
+
+    Uses difflib's get_close_matches for fuzzy string matching when exact
+    match is not found.
+
+    Args:
+        product_name: Product name to match.
+        candidates: List of candidate product names.
+        threshold: Minimum similarity ratio (0.0 to 1.0, default 0.8).
+
+    Returns:
+        Best matching candidate name, or None if no match found.
+    """
+    if not product_name or not candidates:
+        return None
+
+    normalized = normalize_product_name(product_name)
+    if not normalized:
+        return None
+
+    # Build mapping of normalized -> original
+    normalized_candidates = {}
+    for c in candidates:
+        norm_c = normalize_product_name(c)
+        if norm_c:
+            normalized_candidates[norm_c] = c
+
+    # Exact match first (after normalization)
+    if normalized in normalized_candidates:
+        return normalized_candidates[normalized]
+
+    # Fuzzy match
+    matches = get_close_matches(
+        normalized, list(normalized_candidates.keys()), n=1, cutoff=threshold
+    )
+    if matches:
+        return normalized_candidates[matches[0]]
+
+    return None
+
+
+def _apply_name_normalization(df: pd.DataFrame, column: str = "product_name") -> pd.DataFrame:
+    """Apply name normalization to a DataFrame column.
+
+    Creates a new normalized column for matching while preserving the original.
+
+    Args:
+        df: DataFrame to modify.
+        column: Column name to normalize.
+
+    Returns:
+        DataFrame with added normalized column.
+    """
+    df = df.copy()
+    if column in df.columns:
+        df[f"{column}_normalized"] = df[column].apply(normalize_product_name)
+    return df
 
 
 def compare_prices(
@@ -47,20 +143,24 @@ def compare_prices(
     expected_df = expected_df.copy()
     expected_df.columns = expected_df.columns.str.lower().str.strip()
 
+    # Apply name normalization for better matching
+    expected_df = _apply_name_normalization(expected_df, "product_name")
+    actual_df = _apply_name_normalization(actual_df, "product_name")
+
     # Rename actual_price for merge
     if "expected_price" in expected_df.columns:
         expected_df = expected_df.rename(columns={"expected_price": "expected_price"})
 
     # Determine merge keys based on available columns
-    # Support both old format (province) and new format (pricing_level)
-    merge_keys = ["product_name", "category"]
+    # Use normalized product_name for matching
+    merge_keys = ["product_name_normalized", "category"]
 
     # Use pricing_level if available in both, otherwise try province
     if "pricing_level" in expected_df.columns and "pricing_level" in actual_df.columns:
         merge_keys.append("pricing_level")
     elif "province" in expected_df.columns and "province" in actual_df.columns:
         merge_keys.append("province")
-    # If neither matches, just merge on product_name and category
+    # If neither matches, just merge on product_name_normalized and category
 
     if "size" in actual_df.columns:
         # Add size to merge keys if present (for products with size variants)
@@ -82,6 +182,14 @@ def compare_prices(
         merged["expected_price"] = merged["expected_price_expected"]
     if "actual_price" not in merged.columns and "actual_price_actual" in merged.columns:
         merged["actual_price"] = merged["actual_price_actual"]
+
+    # Coalesce product_name from both sides (prefer expected, fall back to actual)
+    if "product_name_expected" in merged.columns and "product_name_actual" in merged.columns:
+        merged["product_name"] = merged["product_name_expected"].fillna(merged["product_name_actual"])
+    elif "product_name_expected" in merged.columns:
+        merged["product_name"] = merged["product_name_expected"]
+    elif "product_name_actual" in merged.columns:
+        merged["product_name"] = merged["product_name_actual"]
 
     # Calculate difference
     merged["price_difference"] = (
@@ -407,8 +515,14 @@ def compare_all_prices(
     expected_df = expected_df.copy()
     expected_df.columns = expected_df.columns.str.lower().str.strip()
 
-    # Determine merge keys - use pricing_level if available, otherwise province
-    merge_keys = ["product_name", "category"]
+    # Apply name normalization for better matching
+    expected_df = _apply_name_normalization(expected_df, "product_name")
+    menu_df = _apply_name_normalization(menu_df, "product_name")
+    if cart_df is not None:
+        cart_df = _apply_name_normalization(cart_df, "product_name")
+
+    # Determine merge keys - use normalized product_name for matching
+    merge_keys = ["product_name_normalized", "category"]
 
     # Check which location identifier to use
     if "pricing_level" in expected_df.columns and "pricing_level" in menu_df.columns:
@@ -423,6 +537,9 @@ def compare_all_prices(
 
     # Determine which columns to include from menu_df
     menu_cols = merge_keys.copy()
+    # Include original product_name for display
+    if "product_name" in menu_df.columns and "product_name" not in menu_cols:
+        menu_cols.append("product_name")
     if "store_name" in menu_df.columns:
         menu_cols.append("store_name")
     if "province" in menu_df.columns and "province" not in menu_cols:
