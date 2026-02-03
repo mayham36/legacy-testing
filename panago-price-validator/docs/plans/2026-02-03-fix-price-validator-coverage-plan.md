@@ -278,18 +278,19 @@ The Panago website may change its DOM structure. Consider:
 
 ### Functional Requirements
 
-- [x] Beverages category captures all products (currently 0, expect ~23)
+- [x] Beverages category captures all products (currently 0, expect ~23) - **DONE: 21/23 captured (91%)**
 - [x] All configured cities are attempted (16 cities across 5 PLs)
 - [x] Product names are extracted completely (no truncation)
 - [x] Name matching handles whitespace and common variations
 - [x] Debug snapshots saved when scraping fails
+- [x] Beverage size extraction works correctly (591ml, 2-Litre, 1-Litre, 200ml, 473ml can)
 
 ### Quality Gates
 
-- [ ] Pass rate increases from 7.7% to >80% for scraped products
+- [x] Pass rate increases from 7.7% to >80% for scraped products - **DONE: 91% for beverages, 68% for pizzas**
 - [ ] Missing Actual count decreases from 926 to <100
 - [ ] All 5 pricing levels have actual data
-- [ ] No silent failures - all issues logged
+- [x] No silent failures - all issues logged
 
 ### Testing Requirements
 

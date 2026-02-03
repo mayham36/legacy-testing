@@ -317,6 +317,131 @@ class PanagoAutomation:
 
         return name.strip() if name else None
 
+    async def _extract_beverage_data(
+        self, product, selectors: dict
+    ) -> list[tuple[str, str | None, str]]:
+        """Extract beverage product data including size variants.
+
+        Beverages on the website often show multiple size options in a format like:
+        "7 UpQty:7 Up - 591 mL / $2.75Qty:7 Up - 2L / $4.00Add to Order"
+
+        Args:
+            product: Playwright locator for the product element.
+            selectors: Dict of selectors to use.
+
+        Returns:
+            List of tuples: (product_name, size, price_text)
+        """
+        results = []
+
+        try:
+            full_text = await product.text_content(timeout=5000)
+            if not full_text:
+                return results
+
+            # Try to parse the "Qty:" format
+            # Pattern: "Product NameQty:Product Name - Size / $Price"
+            if "Qty:" in full_text:
+                # Extract product name from before "Qty:"
+                parts = full_text.split("Qty:")
+                product_name = parts[0].strip()
+
+                # Clean up the product name (remove any trailing garbage)
+                # Product name ends before numbers or special chars
+                product_name = re.split(r'\d', product_name)[0].strip()
+
+                # Parse each "Qty:" section for size/price
+                for part in parts[1:]:
+                    # Format: "Product Name - Size / $Price" or "Product Name - Size / $PriceQty:..."
+                    # Remove trailing "Add to Order" or next Qty section
+                    part = re.split(r'Add to Order|Qty:', part)[0]
+
+                    # Extract price first (always at the end)
+                    price_match = re.search(r'\$?([\d]+\.[\d]{2})', part)
+                    if not price_match:
+                        continue
+                    price = f"${price_match.group(1)}"
+
+                    # Extract size - look for measurement patterns
+                    # Size patterns: "591 mL", "2L", "1L", "200 ml", "473ml can"
+                    size_match = re.search(
+                        r'(\d+\s*(?:ml|mL|l|L|litre|Litre|liter|can))\s*(?:/|$)',
+                        part,
+                        re.IGNORECASE
+                    )
+                    if size_match:
+                        size = size_match.group(1).strip()
+                        # Normalize size format
+                        size = self._normalize_beverage_size(size)
+                        results.append((product_name, size, price))
+                    else:
+                        # No size found, still record the price
+                        results.append((product_name, None, price))
+
+            else:
+                # Fallback: Try to extract name and single price
+                name = await self._extract_product_name(product, selectors)
+                if name:
+                    # Look for price pattern in the text
+                    price_match = re.search(r'\$?([\d]+\.[\d]{2})', full_text)
+                    if price_match:
+                        price = f"${price_match.group(1)}"
+                        results.append((name, None, price))
+
+        except Exception as e:
+            logger.debug("beverage_extraction_failed", error=str(e))
+
+        return results
+
+    def _normalize_beverage_size(self, size: str) -> str:
+        """Normalize beverage size to match master document format.
+
+        Args:
+            size: Raw size string from website (e.g., "591 mL", "2L").
+
+        Returns:
+            Normalized size string (e.g., "591ml", "2-Litre").
+        """
+        if not size:
+            return None
+
+        size = size.strip().lower()
+        # Remove extra whitespace
+        size = " ".join(size.split())
+
+        # Map common size variations to master document format
+        # Check for exact matches first (must match master doc exactly)
+        exact_mappings = {
+            "591 ml": "591ml",
+            "591ml": "591ml",
+            "2l": "2-Litre",
+            "2 l": "2-Litre",
+            "2 litre": "2-Litre",
+            "2-litre": "2-Litre",
+            "1l": "1-Litre",  # Master doc uses "1-Litre"
+            "1 l": "1-Litre",
+            "1 litre": "1-Litre",
+            "1-litre": "1-Litre",
+            "200 ml": "200ml",
+            "200ml": "200ml",
+            "473 ml": "473ml can",
+            "473ml": "473ml can",
+            "473ml can": "473ml can",
+        }
+
+        if size in exact_mappings:
+            return exact_mappings[size]
+
+        # Check for partial matches
+        for pattern, normalized in exact_mappings.items():
+            if pattern in size:
+                return normalized
+
+        # Default: normalize format (remove spaces, ensure ml is lowercase)
+        size = re.sub(r'(\d+)\s*(ml|mL)', r'\1ml', size, flags=re.IGNORECASE)
+        size = re.sub(r'(\d+)\s*(l|L)$', r'\g<1>L', size)
+        return size
+
     def run_price_collection(self) -> list[PriceRecord]:
         """Synchronous entry point - runs async collection.
 
@@ -779,6 +904,26 @@ class PanagoAutomation:
         for i in range(count):
             product = products.nth(i)
             try:
+                # Special handling for beverages - extract size/price variants
+                if category == "beverages":
+                    beverage_data = await self._extract_beverage_data(product, cat_selectors)
+                    for product_name, size, price_text in beverage_data:
+                        if product_name and price_text:
+                            prices.append(
+                                PriceRecord(
+                                    province=location.province,
+                                    store_name=location.store_name,
+                                    category=self._normalize_category(category),
+                                    product_name=product_name,
+                                    actual_price=self._parse_price(price_text),
+                                    raw_price_text=price_text,
+                                    size=size,
+                                    pricing_level=location.get_pricing_level(),
+                                    price_source=PriceSource.MENU,
+                                )
+                            )
+                    continue  # Skip to next product
+
                 # Extract product name using category-specific selector
                 name = await self._extract_product_name(product, cat_selectors)
                 if not name:
