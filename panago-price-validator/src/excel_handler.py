@@ -125,6 +125,7 @@ def save_results(
     results: dict,
     output_dir: Path,
     menu_vs_cart_results: dict | None = None,
+    all_prices_results: dict | None = None,
 ) -> Path:
     """Save comparison results to Excel with security controls.
 
@@ -133,6 +134,8 @@ def save_results(
         output_dir: Directory to save the output file.
         menu_vs_cart_results: Optional dictionary with menu vs cart comparison results.
             Contains comparison_df and mismatches_df.
+        all_prices_results: Optional dictionary with comprehensive comparison results.
+            Contains full_comparison_df and issues_df with expected, menu, and cart prices.
 
     Returns:
         Path to the created output file.
@@ -228,6 +231,48 @@ def save_results(
                 mismatches_df.to_excel(writer, sheet_name="Cart Mismatches", index=False)
                 worksheet = writer.sheets["Cart Mismatches"]
                 for col_num, value in enumerate(mismatches_df.columns.values):
+                    worksheet.write(0, col_num, value, header_format)
+
+        # All Prices Comparison (expected vs menu vs cart) - PRIMARY OUTPUT
+        if all_prices_results:
+            full_df = all_prices_results.get("full_comparison_df", pd.DataFrame())
+            if not full_df.empty:
+                full_df.to_excel(writer, sheet_name="Price Comparison", index=False)
+                worksheet = writer.sheets["Price Comparison"]
+                for col_num, value in enumerate(full_df.columns.values):
+                    worksheet.write(0, col_num, value, header_format)
+
+                # Apply conditional formatting on status column
+                if "status" in full_df.columns:
+                    status_col = full_df.columns.get_loc("status")
+                    worksheet.conditional_format(
+                        1,
+                        status_col,
+                        len(full_df) + 1,
+                        status_col,
+                        {"type": "text", "criteria": "containing", "value": "PASS", "format": pass_format},
+                    )
+                    worksheet.conditional_format(
+                        1,
+                        status_col,
+                        len(full_df) + 1,
+                        status_col,
+                        {"type": "text", "criteria": "not containing", "value": "PASS", "format": fail_format},
+                    )
+
+                # Format price columns as currency
+                price_cols = ["expected_price", "menu_price", "cart_price"]
+                for col_name in price_cols:
+                    if col_name in full_df.columns:
+                        col_idx = full_df.columns.get_loc(col_name)
+                        worksheet.set_column(col_idx, col_idx, 12, currency_format)
+
+            # Issues sheet (only rows with problems)
+            issues_df = all_prices_results.get("issues_df", pd.DataFrame())
+            if not issues_df.empty:
+                issues_df.to_excel(writer, sheet_name="Price Issues", index=False)
+                worksheet = writer.sheets["Price Issues"]
+                for col_num, value in enumerate(issues_df.columns.values):
                     worksheet.write(0, col_num, value, header_format)
 
     return output_path

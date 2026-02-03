@@ -1,0 +1,98 @@
+# Pricing Levels Configuration
+# Maps pricing levels (PLs) to regions and cities
+
+pricing_levels:
+  PL1:
+    name: "British Columbia"
+    description: "BC Stores"
+    provinces: ["BC"]
+    cities:
+      - city: "Vancouver"
+        store_name: "Vancouver"
+      - city: "Victoria"
+        store_name: "Downtown Victoria"
+      - city: "Kelowna"
+        store_name: "Downtown Kelowna"
+      - city: "Kamloops"
+        store_name: "North Kamloops"
+      - city: "Nanaimo"
+        store_name: "North Nanaimo"
+      - city: "Surrey"
+        store_name: "South Surrey"
+      - city: "Burnaby"
+        store_name: "Brentwood"
+      - city: "Richmond"
+        store_name: "Richmond Centre"
+      - city: "Langley"
+        store_name: "Downtown Langley"
+      - city: "Abbotsford"
+        store_name: "Mount Lehman"
+      - city: "Chilliwack"
+        store_name: "North Chilliwack"
+      - city: "Prince George"
+        store_name: "Downtown Prince George"
+
+  PL2:
+    name: "Alberta & Saskatchewan"
+    description: "AB & SK Stores (except Fort McMurray & Peace River)"
+    provinces: ["AB", "SK"]
+    exclude_cities: ["Fort McMurray", "Peace River"]
+    cities:
+      - city: "Calgary"
+        store_name: "Crowfoot Crossing"
+      - city: "Edmonton"
+        store_name: "Downtown Edmonton"
+      - city: "Red Deer"
+        store_name: "Red Deer"
+      - city: "Lethbridge"
+        store_name: "West Lethbridge"
+      - city: "Medicine Hat"
+        store_name: "Medicine Hat"
+      - city: "Grande Prairie"
+        store_name: "Grande Prairie"
+      - city: "Airdrie"
+        store_name: "Airdrie Midtown"
+      - city: "Sherwood Park"
+        store_name: "North Sherwood Park"
+      - city: "Saskatoon"
+        store_name: "Saskatoon"
+      - city: "Regina"
+        store_name: "Regina"
+
+  PL2-B:
+    name: "Fort McMurray & Peace River"
+    description: "Fort McMurray & Peace River, AB Stores"
+    provinces: ["AB"]
+    cities:
+      - city: "Fort McMurray"
+        store_name: "Fort McMurray"
+      - city: "Peace River"
+        store_name: "Peace River"
+
+  PL3:
+    name: "Yukon"
+    description: "Whitehorse, YT Only"
+    provinces: ["YT"]
+    cities:
+      - city: "Whitehorse"
+        store_name: "Whitehorse"
+
+  PL4:
+    name: "Ontario"
+    description: "Ontario Stores"
+    provinces: ["ON"]
+    cities:
+      - city: "Toronto"
+        store_name: "Toronto"
+      - city: "Ottawa"
+        store_name: "Ottawa"
+      - city: "Mississauga"
+        store_name: "Mississauga"
+      - city: "Hamilton"
+        store_name: "Hamilton"
+      - city: "London"
+        store_name: "London"
+      - city: "Kitchener"
+        store_name: "Kitchener"
+      - city: "Windsor"
+        store_name: "Windsor"

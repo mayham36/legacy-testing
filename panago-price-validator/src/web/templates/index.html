@@ -22,6 +22,37 @@
             <p class="subtitle">Select cities to validate pricing</p>
         </header>
 
+        <!-- Master Document Section -->
+        <div class="master-section">
+            <h2>
+                <span class="material-icons">description</span>
+                Master Pricing Document
+            </h2>
+            <div class="master-info" id="masterInfo">
+                {% if master_info %}
+                <div class="master-loaded">
+                    <span class="material-icons status-icon success">check_circle</span>
+                    <div class="master-details">
+                        <strong>{{ master_info.filename }}</strong>
+                        <span class="meta">Uploaded: {{ master_info.uploaded_at }} | {{ master_info.total_prices }} prices</span>
+                    </div>
+                </div>
+                {% else %}
+                <div class="master-empty">
+                    <span class="material-icons status-icon warning">warning</span>
+                    <span>No master document loaded. Upload one to compare against expected prices.</span>
+                </div>
+                {% endif %}
+            </div>
+            <div class="master-upload">
+                <input type="file" id="masterFile" accept=".xls,.xlsx" style="display:none" onchange="uploadMaster(this)">
+                <button type="button" class="btn btn-outlined" onclick="document.getElementById('masterFile').click()">
+                    <span class="material-icons">upload_file</span>
+                    Upload Master Document
+                </button>
+            </div>
+        </div>
+
         <div class="controls">
             <button type="button" class="btn btn-outlined" onclick="selectAll()">
                 <span class="material-icons">select_all</span>
@@ -35,14 +66,18 @@
         </div>
 
         <form id="validationForm" onsubmit="startValidation(event)">
-            <div class="provinces-grid">
-                {% for province, cities in provinces.items() %}
-                <div class="province-section">
-                    <h2 class="province-title">{{ province }}</h2>
+            <div class="pricing-levels-grid">
+                {% for pl_code, pl_data in pricing_levels.items() %}
+                <div class="pl-section">
+                    <h2 class="pl-title">
+                        <span class="pl-code">{{ pl_code }}</span>
+                        <span class="pl-name">{{ pl_data.name }}</span>
+                    </h2>
+                    <p class="pl-description">{{ pl_data.description }}</p>
                     <div class="cities-grid">
-                        {% for city in cities %}
-                        <label class="city-tile" data-province="{{ province }}">
-                            <input type="checkbox" name="cities" value="{{ province }}:{{ city.city }}" onchange="updateCount()">
+                        {% for city in pl_data.cities %}
+                        <label class="city-tile" data-pl="{{ pl_code }}">
+                            <input type="checkbox" name="cities" value="{{ pl_code }}:{{ city.city }}" onchange="updateCount()">
                             <div class="tile-content">
                                 <span class="material-icons city-icon">location_city</span>
                                 <span class="city-name">{{ city.city }}</span>
@@ -136,6 +171,40 @@
         function deselectAll() {
             document.querySelectorAll('input[name="cities"]').forEach(cb => cb.checked = false);
             updateCount();
+        }
+
+        async function uploadMaster(input) {
+            if (!input.files || input.files.length === 0) return;
+
+            const file = input.files[0];
+            const formData = new FormData();
+            formData.append('file', file);
+
+            const btn = input.previousElementSibling || document.querySelector('.master-upload button');
+            const originalText = btn.innerHTML;
+            btn.innerHTML = '<span class="material-icons">hourglass_empty</span> Uploading...';
+            btn.disabled = true;
+
+            try {
+                const response = await fetch('/upload-master', {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await response.json();
+
+                if (data.error) {
+                    alert('Upload failed: ' + data.error);
+                } else {
+                    // Refresh page to show new master info
+                    window.location.reload();
+                }
+            } catch (error) {
+                alert('Upload failed: ' + error.message);
+            } finally {
+                btn.innerHTML = originalText;
+                btn.disabled = false;
+                input.value = '';
+            }
         }
 
         async function startValidation(event) {

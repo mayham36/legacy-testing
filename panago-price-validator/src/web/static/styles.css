@@ -767,3 +767,104 @@ body {
         justify-content: center;
     }
 }
+
+/* Master Document Section */
+.master-section {
+    background: var(--md-sys-color-surface-variant);
+    border-radius: var(--md-sys-shape-corner-large);
+    padding: 20px;
+    margin-bottom: 24px;
+}
+
+.master-section h2 {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 1.1rem;
+    font-weight: 500;
+    margin-bottom: 12px;
+    color: var(--md-sys-color-on-surface);
+}
+
+.master-section h2 .material-icons {
+    color: var(--md-sys-color-primary);
+}
+
+.master-info {
+    margin-bottom: 12px;
+}
+
+.master-loaded, .master-empty {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px;
+    background: white;
+    border-radius: var(--md-sys-shape-corner-medium);
+}
+
+.master-details {
+    display: flex;
+    flex-direction: column;
+}
+
+.master-details .meta {
+    font-size: 0.85rem;
+    color: var(--md-sys-color-on-surface-variant);
+}
+
+.status-icon.success {
+    color: var(--md-sys-color-success);
+}
+
+.status-icon.warning {
+    color: #F59E0B;
+}
+
+.master-upload {
+    display: flex;
+    justify-content: flex-start;
+}
+
+/* Pricing Levels Grid */
+.pricing-levels-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+    margin-bottom: 24px;
+}
+
+.pl-section {
+    background: white;
+    border-radius: var(--md-sys-shape-corner-large);
+    padding: 20px;
+    box-shadow: var(--md-sys-elevation-1);
+}
+
+.pl-title {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 1.2rem;
+    font-weight: 500;
+    margin-bottom: 4px;
+}
+
+.pl-code {
+    background: var(--md-sys-color-primary);
+    color: var(--md-sys-color-on-primary);
+    padding: 4px 10px;
+    border-radius: var(--md-sys-shape-corner-full);
+    font-size: 0.85rem;
+    font-weight: 600;
+}
+
+.pl-name {
+    color: var(--md-sys-color-on-surface);
+}
+
+.pl-description {
+    font-size: 0.9rem;
+    color: var(--md-sys-color-on-surface-variant);
+    margin-bottom: 16px;
+}

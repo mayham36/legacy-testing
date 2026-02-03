@@ -342,3 +342,168 @@ def _create_empty_menu_vs_cart_results(message: str) -> dict:
         "comparison_df": pd.DataFrame(columns=output_columns),
         "mismatches_df": pd.DataFrame(columns=output_columns),
     }
+
+
+def compare_all_prices(
+    expected_df: pd.DataFrame,
+    actual_prices: list[PriceRecord],
+    tolerance: float = 0.01,
+) -> dict:
+    """Compare expected, menu, and cart prices in a single comprehensive view.
+
+    Creates a unified comparison showing all three price sources side-by-side:
+    - Expected price (from Marketing spreadsheet)
+    - Menu price (scraped from website menu)
+    - Cart price (scraped from shopping cart)
+
+    Args:
+        expected_df: DataFrame with expected prices from Marketing.
+        actual_prices: List of PriceRecord objects (both menu and cart).
+        tolerance: Maximum acceptable price difference in dollars.
+
+    Returns:
+        Dictionary containing:
+            - summary: Human-readable summary string
+            - full_comparison_df: DataFrame with all three prices side by side
+            - issues_df: DataFrame with any price mismatches
+    """
+    if not actual_prices:
+        return _create_empty_all_prices_results("No actual prices collected")
+
+    # Split actual prices by source
+    menu_prices = [p for p in actual_prices if p.price_source == PriceSource.MENU]
+    cart_prices = [p for p in actual_prices if p.price_source == PriceSource.CART]
+
+    if not menu_prices:
+        return _create_empty_all_prices_results("No menu prices collected")
+
+    # Convert to DataFrames
+    menu_df = pd.DataFrame([p.to_dict() for p in menu_prices])
+    menu_df = menu_df.rename(columns={"actual_price": "menu_price"})
+
+    cart_df = None
+    if cart_prices:
+        cart_df = pd.DataFrame([p.to_dict() for p in cart_prices])
+        cart_df = cart_df.rename(columns={"actual_price": "cart_price"})
+
+    # Normalize expected_df
+    expected_df = expected_df.copy()
+    expected_df.columns = expected_df.columns.str.lower().str.strip()
+
+    # Determine merge keys
+    merge_keys = ["product_name", "category", "province"]
+    if "size" in menu_df.columns:
+        merge_keys.append("size")
+        if "size" not in expected_df.columns:
+            expected_df["size"] = None
+
+    # Start with menu prices as the base
+    result_df = menu_df[merge_keys + ["store_name", "menu_price"]].copy()
+
+    # Merge with expected prices
+    if not expected_df.empty:
+        result_df = pd.merge(
+            result_df,
+            expected_df[merge_keys + ["expected_price"]],
+            on=merge_keys,
+            how="left",
+        )
+    else:
+        result_df["expected_price"] = None
+
+    # Merge with cart prices if available
+    if cart_df is not None and not cart_df.empty:
+        cart_merge_keys = [k for k in merge_keys if k in cart_df.columns]
+        cart_subset = cart_df[cart_merge_keys + ["cart_price"]].copy()
+        result_df = pd.merge(
+            result_df,
+            cart_subset,
+            on=cart_merge_keys,
+            how="left",
+        )
+    else:
+        result_df["cart_price"] = None
+
+    # Calculate differences
+    result_df["menu_vs_expected_diff"] = (
+        result_df["menu_price"].astype(float) - result_df["expected_price"].astype(float)
+    ).round(2)
+
+    result_df["cart_vs_menu_diff"] = (
+        result_df["cart_price"].astype(float) - result_df["menu_price"].astype(float)
+    ).round(2)
+
+    # Determine status
+    def get_status(row):
+        issues = []
+
+        # Check menu vs expected
+        if pd.notna(row["expected_price"]) and pd.notna(row["menu_price"]):
+            if abs(float(row["menu_vs_expected_diff"])) > tolerance:
+                issues.append("MENU≠EXPECTED")
+        elif pd.isna(row["expected_price"]):
+            issues.append("NO_EXPECTED")
+
+        # Check cart vs menu
+        if pd.notna(row["cart_price"]) and pd.notna(row["menu_price"]):
+            if abs(float(row["cart_vs_menu_diff"])) > tolerance:
+                issues.append("CART≠MENU")
+        elif pd.isna(row["cart_price"]) and cart_prices:  # Only flag if cart capture was enabled
+            issues.append("NO_CART")
+
+        return "PASS" if not issues else ", ".join(issues)
+
+    result_df["status"] = result_df.apply(get_status, axis=1)
+
+    # Reorder columns for clarity
+    output_columns = [
+        "province",
+        "store_name",
+        "category",
+        "product_name",
+        "size",
+        "expected_price",
+        "menu_price",
+        "cart_price",
+        "menu_vs_expected_diff",
+        "cart_vs_menu_diff",
+        "status",
+    ]
+    available_columns = [c for c in output_columns if c in result_df.columns]
+    result_df = result_df[available_columns]
+
+    # Generate summary
+    total = len(result_df)
+    passed = len(result_df[result_df["status"] == "PASS"])
+    menu_issues = len(result_df[result_df["status"].str.contains("MENU≠EXPECTED", na=False)])
+    cart_issues = len(result_df[result_df["status"].str.contains("CART≠MENU", na=False)])
+
+    issues_df = result_df[result_df["status"] != "PASS"].copy()
+
+    return {
+        "summary": f"Total: {total}, Pass: {passed}, Menu≠Expected: {menu_issues}, Cart≠Menu: {cart_issues}",
+        "full_comparison_df": result_df,
+        "issues_df": issues_df,
+    }
+
+
+def _create_empty_all_prices_results(message: str) -> dict:
+    """Create empty results for all-prices comparison."""
+    output_columns = [
+        "province",
+        "store_name",
+        "category",
+        "product_name",
+        "size",
+        "expected_price",
+        "menu_price",
+        "cart_price",
+        "menu_vs_expected_diff",
+        "cart_vs_menu_diff",
+        "status",
+    ]
+    return {
+        "summary": message,
+        "full_comparison_df": pd.DataFrame(columns=output_columns),
+        "issues_df": pd.DataFrame(columns=output_columns),
+    }

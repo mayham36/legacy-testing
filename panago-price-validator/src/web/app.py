@@ -1,21 +1,24 @@
 """FastAPI web application for Panago Price Validator."""
 import asyncio
+import json
 import re
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 import yaml
-from fastapi import FastAPI, Request, BackgroundTasks
+from fastapi import FastAPI, Request, BackgroundTasks, UploadFile, File
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from ..models import AutomationConfig, LocationConfig
+from ..models import AutomationConfig, LocationConfig, PricingLevel, PROVINCE_TO_PL
 from ..browser_automation import PanagoAutomation
 from ..excel_handler import load_expected_prices, save_results
-from ..comparison import compare_prices, compare_menu_vs_cart
+from ..comparison import compare_prices, compare_menu_vs_cart, compare_all_prices
 from ..config_loader import load_settings
+from ..master_parser import MasterDocumentParser, load_master_document
 
 app = FastAPI(title="Panago Price Validator", version="1.0.0")
 
@@ -26,9 +29,12 @@ STATIC_DIR = BASE_DIR / "static"
 CONFIG_DIR = Path(__file__).parent.parent.parent / "config"
 INPUT_DIR = Path(__file__).parent.parent.parent / "input"
 OUTPUT_DIR = Path(__file__).parent.parent.parent / "output"
+UPLOAD_DIR = Path(__file__).parent.parent.parent / "uploads"
+MASTER_INFO_FILE = UPLOAD_DIR / "master_info.json"
 
-# Ensure output directory exists
+# Ensure directories exist
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 # Setup templates and static files
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
@@ -72,6 +78,46 @@ def quoted_str_representer(dumper, data):
 yaml.add_representer(QuotedString, quoted_str_representer)
 
 
+def load_pricing_levels() -> dict[str, dict]:
+    """Load pricing levels from config file."""
+    pl_path = CONFIG_DIR / "pricing_levels.yaml"
+    if not pl_path.exists():
+        return {}
+
+    with open(pl_path) as f:
+        data = yaml.safe_load(f)
+
+    return data.get("pricing_levels", {})
+
+
+def get_master_info() -> Optional[dict]:
+    """Get info about the currently loaded master document."""
+    if not MASTER_INFO_FILE.exists():
+        return None
+
+    try:
+        with open(MASTER_INFO_FILE) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, IOError):
+        return None
+
+
+def save_master_info(info: dict) -> None:
+    """Save master document info."""
+    with open(MASTER_INFO_FILE, "w") as f:
+        json.dump(info, f, indent=2)
+
+
+def get_current_master_path() -> Optional[Path]:
+    """Get the path to the currently loaded master document."""
+    info = get_master_info()
+    if info and "path" in info:
+        path = Path(info["path"])
+        if path.exists():
+            return path
+    return None
+
+
 def save_cities_to_config(provinces: dict[str, list[dict]]) -> None:
     """Save cities to locations.yaml, preserving other config like categories."""
     locations_path = CONFIG_DIR / "locations.yaml"
@@ -101,12 +147,14 @@ def save_cities_to_config(provinces: dict[str, list[dict]]) -> None:
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     """Render the main UI with city selection tiles."""
-    provinces = load_cities_from_config()
+    pricing_levels = load_pricing_levels()
+    master_info = get_master_info()
     return templates.TemplateResponse(
         "index.html",
         {
             "request": request,
-            "provinces": provinces,
+            "pricing_levels": pricing_levels,
+            "master_info": master_info,
         }
     )
 
@@ -148,20 +196,32 @@ async def run_validation_task(job_id: str, selected_cities: list[str], capture_c
         job["message"] = "Loading configuration..."
         job["progress"] = 5
 
-        # Parse selected cities (format: "province:city")
+        # Parse selected cities (format: "PL:city" for pricing levels)
         locations: list[LocationConfig] = []
-        provinces_data = load_cities_from_config()
+        pricing_levels_config = load_pricing_levels()
 
         for city_key in selected_cities:
-            province, city_name = city_key.split(":", 1)
-            # Find the city data
-            province_cities = provinces_data.get(province, [])
-            for city_data in province_cities:
+            pl_code, city_name = city_key.split(":", 1)
+
+            # Find the city in pricing levels config
+            pl_config = pricing_levels_config.get(pl_code, {})
+            pl_cities = pl_config.get("cities", [])
+            provinces = pl_config.get("provinces", [])
+            province = provinces[0] if provinces else "BC"
+
+            for city_data in pl_cities:
                 if city_data["city"] == city_name:
+                    # Convert PL code to PricingLevel enum
+                    try:
+                        pricing_level = PricingLevel(pl_code)
+                    except ValueError:
+                        pricing_level = PricingLevel.PL1
+
                     locations.append(LocationConfig(
                         store_name=city_data.get("store_name", city_name),
-                        address=city_name,  # Use city name for lookup
+                        address=city_name,
                         province=province,
+                        pricing_level=pricing_level,
                     ))
                     break
 
@@ -226,28 +286,67 @@ async def run_validation_task(job_id: str, selected_cities: list[str], capture_c
         job["message"] = f"Collected {len(actual_prices)} prices. Comparing..."
         job["progress"] = 80
 
-        # Load expected prices
-        expected_prices = load_expected_prices(config.input_file)
+        # Load expected prices from master document or fallback to old format
+        master_path = get_current_master_path()
+        expected_prices_list = None
+        expected_df = None
+
+        if master_path:
+            job["message"] = "Loading expected prices from master document..."
+            expected_prices_list = load_master_document(master_path)
+            # Convert to DataFrame for comparison
+            import pandas as pd
+            expected_df = pd.DataFrame([p.to_dict() for p in expected_prices_list])
+        else:
+            # Fallback to old expected_prices.xlsx format
+            if config.input_file.exists():
+                expected_df = load_expected_prices(config.input_file)
+
+        # Filter to only MENU prices for expected vs actual comparison
+        from ..models import PriceSource
+        menu_prices = [p for p in actual_prices if p.price_source == PriceSource.MENU]
 
         # Compare prices (expected vs actual menu prices)
-        results = compare_prices(expected_prices, actual_prices, tolerance=0.01)
+        if expected_df is not None and not expected_df.empty:
+            results = compare_prices(expected_df, menu_prices, tolerance=0.01)
+        else:
+            results = {
+                "summary": "No expected prices loaded",
+                "summary_df": pd.DataFrame(),
+                "details_df": pd.DataFrame(),
+                "discrepancies_df": pd.DataFrame(),
+            }
 
         # Compare menu vs cart prices if cart capture was enabled
         menu_vs_cart_results = None
+        all_prices_results = None
         if capture_cart:
             job["message"] = "Comparing menu vs cart prices..."
             job["progress"] = 85
             menu_vs_cart_results = compare_menu_vs_cart(actual_prices, tolerance=0.01)
 
+            # Create comprehensive comparison with all three prices
+            if expected_df is not None and not expected_df.empty:
+                job["message"] = "Creating comprehensive price comparison..."
+                job["progress"] = 88
+                all_prices_results = compare_all_prices(expected_df, actual_prices, tolerance=0.01)
+
         job["message"] = "Saving results..."
         job["progress"] = 90
 
         # Save results
-        output_path = save_results(results, config.output_dir, menu_vs_cart_results=menu_vs_cart_results)
+        output_path = save_results(
+            results,
+            config.output_dir,
+            menu_vs_cart_results=menu_vs_cart_results,
+            all_prices_results=all_prices_results,
+        )
 
         # Build summary message
         summary_parts = [results['summary']]
-        if menu_vs_cart_results:
+        if all_prices_results:
+            summary_parts.append(all_prices_results['summary'])
+        elif menu_vs_cart_results:
             summary_parts.append(menu_vs_cart_results['summary'])
 
         job["status"] = "completed"
@@ -256,6 +355,8 @@ async def run_validation_task(job_id: str, selected_cities: list[str], capture_c
         job["result_file"] = str(output_path)
 
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         job["status"] = "error"
         job["message"] = f"Error: {str(e)}"
         job["error"] = str(e)
@@ -336,6 +437,77 @@ async def download_latest():
         filename=latest_file.name,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
+
+
+# Master document management routes
+
+
+@app.post("/upload-master")
+async def upload_master(file: UploadFile = File(...)):
+    """Upload and parse a master pricing document."""
+    # Validate file type
+    if not file.filename or not file.filename.endswith(('.xls', '.xlsx')):
+        return JSONResponse(
+            {"error": "File must be an Excel document (.xls or .xlsx)"},
+            status_code=400
+        )
+
+    # Save the uploaded file
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe_filename = re.sub(r'[^\w\-_.]', '_', file.filename)
+    filename = f"master_{timestamp}_{safe_filename}"
+    file_path = UPLOAD_DIR / filename
+
+    try:
+        content = await file.read()
+        with open(file_path, "wb") as f:
+            f.write(content)
+
+        # Parse the document to validate it
+        parser = MasterDocumentParser(file_path)
+        prices = parser.parse()
+        summary = parser.get_summary()
+
+        # Save master info
+        master_info = {
+            "path": str(file_path),
+            "filename": file.filename,
+            "uploaded_at": timestamp,
+            "total_prices": summary["total"],
+            "by_category": summary["by_category"],
+            "by_pl": summary["by_pl"],
+        }
+        save_master_info(master_info)
+
+        return {
+            "success": True,
+            "message": f"Uploaded and parsed {file.filename}",
+            "filename": filename,
+            "summary": summary,
+        }
+
+    except Exception as e:
+        # Clean up file on error
+        if file_path.exists():
+            file_path.unlink()
+        return JSONResponse(
+            {"error": f"Failed to parse document: {str(e)}"},
+            status_code=400
+        )
+
+
+@app.get("/master-info")
+async def master_info():
+    """Get info about the currently loaded master document."""
+    info = get_master_info()
+    if not info:
+        return {"loaded": False}
+
+    # Check if file still exists
+    if not Path(info.get("path", "")).exists():
+        return {"loaded": False, "error": "Master file no longer exists"}
+
+    return {"loaded": True, **info}
 
 
 # Admin routes for city configuration

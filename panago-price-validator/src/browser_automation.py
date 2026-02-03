@@ -550,6 +550,7 @@ class PanagoAutomation:
                                             actual_price=self._parse_price(price_text),
                                             raw_price_text=price_text,
                                             size=size,
+                                            pricing_level=location.get_pricing_level(),
                                             price_source=PriceSource.MENU,
                                         )
                                     )
@@ -615,6 +616,7 @@ class PanagoAutomation:
                             actual_price=self._parse_price(price_text),
                             raw_price_text=price_text or "",
                             size=None,
+                            pricing_level=location.get_pricing_level(),
                             price_source=PriceSource.MENU,
                         )
                     )
@@ -1098,6 +1100,7 @@ class PanagoAutomation:
                     actual_price=cart_price,
                     raw_price_text=f"${cart_price}",
                     size=size,
+                    pricing_level=location.get_pricing_level(),
                     price_source=PriceSource.CART,
                 )
 
