@@ -197,6 +197,10 @@ async def run_validation_task(job_id: str, selected_cities: list[str], capture_c
         job["message"] = "Starting browser automation..."
         job["progress"] = 15
 
+        # Progress callback to update job status in real-time
+        def update_progress(message: str):
+            job["message"] = message
+
         # Create automation instance
         automation = PanagoAutomation(
             config,
@@ -205,6 +209,7 @@ async def run_validation_task(job_id: str, selected_cities: list[str], capture_c
             min_delay_ms=min_delay,
             max_delay_ms=max_delay,
             capture_cart_prices=capture_cart,
+            progress_callback=update_progress,
         )
 
         # Override locations with selected ones

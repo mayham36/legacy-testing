@@ -5,7 +5,7 @@ import re
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Callable
 
 import structlog
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
@@ -46,12 +46,23 @@ class PanagoAutomation:
 
     # Product categories to scrape - matches panago.com URL structure
     # Note: "Sides" contains wings, breadstuff, etc. on the actual site
-    CATEGORIES = ["pizzas", "salads", "sides", "dips", "dessert", "beverages"]
+    # Pizza has multiple subcategories that need to be scraped separately
+    CATEGORIES = [
+        "pizzas-meat",
+        "pizzas-veggie",
+        "pizzas-plant-based",
+        "salads",
+        "sides",
+        "dips",
+        "dessert",
+        "beverages",
+    ]
 
     # Menu URL paths for each category
-    # Note: /menu/pizzas may redirect, so we use a subcategory
     CATEGORY_URLS = {
-        "pizzas": "/menu/pizzas/meat",  # Use meat pizzas as main pizza page
+        "pizzas-meat": "/menu/pizzas/meat",
+        "pizzas-veggie": "/menu/pizzas/veggie",
+        "pizzas-plant-based": "/menu/pizzas/plant_based",
         "salads": "/menu/salads",
         "sides": "/menu/sides",  # Contains wings, breadstuff, etc.
         "dips": "/menu/dips",
@@ -89,10 +100,14 @@ class PanagoAutomation:
 
     # Cart interaction selectors - for capturing prices from the shopping cart
     CART_SELECTORS = {
-        # Product modal (opens when clicking a product card)
-        "product_modal": ".product-modal, [class*='product-modal'], .modal, .product-detail",
-        "size_option": ".size-option, [class*='size'] label, .prices li label, .size-selector label",
-        "add_to_cart_button": "button.add-to-cart, .add-to-cart, [class*='add-to-cart'], button[type='submit']",
+        # Add to Order button on product cards
+        "add_to_order_button": "a:has-text('Add to Order'), button:has-text('Add to Order'), .prices-actions a, a.button",
+        # Product modal/customization panel (opens after clicking Add to Order)
+        "product_modal": ".product-modal, [class*='product-modal'], .modal, .product-detail, .customization",
+        # Size and crust radio buttons (after clicking Add to Order)
+        "size_option": "input[type='radio'][name*='size'], input[type='radio'][name*='Size'], label:has(input[type='radio'])",
+        "crust_option": "input[type='radio'][name*='crust'], input[type='radio'][name*='Crust'], input[type='radio'][name*='dough']",
+        "add_to_cart_button": "button:has-text('Add to Cart'), button:has-text('Add to Order'), .add-to-cart, button[type='submit']",
         # Cart sidebar/modal
         "cart_icon": ".cart-icon, [class*='cart'], header a[href*='cart'], .shopping-cart-icon",
         "cart_sidebar": ".cart-sidebar, [class*='cart-panel'], .shopping-cart, .cart-drawer",
@@ -113,6 +128,7 @@ class PanagoAutomation:
         min_delay_ms: int = 3000,
         max_delay_ms: int = 6000,
         capture_cart_prices: bool = False,
+        progress_callback: Optional[Callable[[str], None]] = None,
     ) -> None:
         """Initialize the automation engine.
 
@@ -123,15 +139,22 @@ class PanagoAutomation:
             min_delay_ms: Minimum delay between actions in milliseconds.
             max_delay_ms: Maximum delay between actions in milliseconds.
             capture_cart_prices: If True, also capture prices from cart (slower).
+            progress_callback: Optional callback function to report progress messages.
         """
         self.config = config
         self.base_url = base_url
         self.min_delay_ms = min_delay_ms
         self.max_delay_ms = max_delay_ms
         self.capture_cart_prices = capture_cart_prices
+        self.progress_callback = progress_callback
         self._semaphore: Optional[asyncio.Semaphore] = None
         self._locations_path = locations_path
         self._locations: list[LocationConfig] = []
+
+    def _report_progress(self, message: str) -> None:
+        """Report progress via callback if available."""
+        if self.progress_callback:
+            self.progress_callback(message)
 
     def run_price_collection(self) -> list[PriceRecord]:
         """Synchronous entry point - runs async collection.
@@ -294,6 +317,7 @@ class PanagoAutomation:
             province=location.province,
             base_url=self.base_url,
         )
+        self._report_progress(f"🏪 {location.store_name} ({location.province}) - Opening browser...")
 
         # Initial delay before starting
         await self._wait_with_jitter()
@@ -317,10 +341,11 @@ class PanagoAutomation:
             try:
                 logger.info(
                     "scraping_category",
-                    category=category,
+                    category=self._normalize_category(category),
                     progress=f"{idx}/{total_categories}",
                     store=location.store_name,
                 )
+                self._report_progress(f"📂 {location.store_name} - Scraping {category} ({idx}/{total_categories})")
 
                 category_prices = await self._scrape_category(
                     page, category, location
@@ -329,9 +354,10 @@ class PanagoAutomation:
 
                 logger.info(
                     "category_complete",
-                    category=category,
+                    category=self._normalize_category(category),
                     products_found=len(category_prices),
                 )
+                self._report_progress(f"✅ {category} complete - {len(category_prices)} prices found")
 
                 # Delay between categories (use full configured delay)
                 if idx < total_categories:
@@ -340,7 +366,7 @@ class PanagoAutomation:
             except Exception as e:
                 logger.warning(
                     "category_scrape_failed",
-                    category=category,
+                    category=self._normalize_category(category),
                     store=location.store_name,
                     error=str(e),
                 )
@@ -430,8 +456,11 @@ class PanagoAutomation:
         except Exception as e:
             logger.warning("save_button_not_found", error=str(e))
 
-        # Wait for page to update
-        await page.wait_for_load_state("networkidle")
+        # Wait for page to update (use domcontentloaded - networkidle can hang on sites with continuous activity)
+        try:
+            await page.wait_for_load_state("domcontentloaded", timeout=10000)
+        except Exception as e:
+            logger.debug("load_state_timeout", error=str(e))
         logger.info("location_selected", city=city)
 
     async def _scrape_category(
@@ -451,17 +480,21 @@ class PanagoAutomation:
         """
         # Navigate directly to category URL (more reliable than clicking)
         category_url = self.CATEGORY_URLS.get(category, f"/menu/{category}")
+        full_url = f"{self.base_url}{category_url}"
+        logger.info("navigating_to_category", url=full_url)
+        self._report_progress(f"🔗 Navigating to {full_url}")
         try:
             await page.goto(
-                f"{self.base_url}{category_url}",
+                full_url,
                 wait_until="domcontentloaded",
                 timeout=60000,  # 60 second timeout for slow staging site
             )
+            logger.info("navigation_complete", final_url=page.url)
         except Exception as e:
-            logger.warning("page_load_slow", url=category_url, error=str(e))
+            logger.warning("page_load_failed", url=full_url, error=str(e))
 
         # Wait for page content to load
-        await asyncio.sleep(3)  # Give React time to render
+        await asyncio.sleep(1)  # Give React time to render
 
         products = page.locator(self.SELECTORS["product_card"])
         count = await products.count()
@@ -486,6 +519,8 @@ class PanagoAutomation:
 
                 if price_list_count > 1:
                     # Multiple sizes - extract each size/price pair
+                    # First collect all menu prices, then do ONE cart capture for first size
+                    first_size_for_cart = None
                     for j in range(price_list_count):
                         item = price_list_items.nth(j)
                         try:
@@ -497,6 +532,10 @@ class PanagoAutomation:
                                 # Clean up: remove trailing colon and whitespace
                                 size = size_text.strip().rstrip(":").strip() if size_text else None
 
+                            # Remember first size for cart capture later
+                            if first_size_for_cart is None:
+                                first_size_for_cart = size
+
                             # Get price value
                             price_elem = item.locator(self.SELECTORS["price_value"])
                             if await price_elem.count() > 0:
@@ -506,7 +545,7 @@ class PanagoAutomation:
                                         PriceRecord(
                                             province=location.province,
                                             store_name=location.store_name,
-                                            category=category,
+                                            category=self._normalize_category(category),
                                             product_name=name.strip() if name else "",
                                             actual_price=self._parse_price(price_text),
                                             raw_price_text=price_text,
@@ -514,19 +553,6 @@ class PanagoAutomation:
                                             price_source=PriceSource.MENU,
                                         )
                                     )
-                                    # Capture cart price if enabled
-                                    if self.capture_cart_prices:
-                                        cart_record = await self._capture_cart_price_for_product(
-                                            page,
-                                            product,
-                                            name.strip() if name else "",
-                                            size,
-                                            location,
-                                            category,
-                                        )
-                                        if cart_record:
-                                            prices.append(cart_record)
-                                        await self._wait_with_jitter(1000, 2000)
                         except Exception as e:
                             logger.debug(
                                 "size_extraction_failed",
@@ -534,6 +560,30 @@ class PanagoAutomation:
                                 size_index=j,
                                 error=str(e),
                             )
+
+                    # After collecting all menu prices, capture ONE cart price for this product
+                    # This avoids navigation issues from trying to capture for each size
+                    if self.capture_cart_prices and name:
+                        product_display = f"{name.strip()} ({first_size_for_cart})" if first_size_for_cart else name.strip()
+                        self._report_progress(f"🛒 Adding to cart: {product_display}")
+                        cart_record = await self._capture_cart_price_for_product(
+                            page,
+                            product,
+                            name.strip(),
+                            first_size_for_cart,  # Use first size
+                            location,
+                            category,
+                        )
+                        if cart_record:
+                            prices.append(cart_record)
+                            self._report_progress(f"💰 Cart price: ${cart_record.actual_price}")
+                        else:
+                            self._report_progress(f"⚠️ Could not get cart price")
+
+                        # Re-fetch products locator after navigation
+                        # (Playwright locators are lazy, but this ensures we're working with current DOM)
+                        products = page.locator(self.SELECTORS["product_card"])
+                        await asyncio.sleep(0.3)
                 else:
                     # Single price or different format
                     price_locator = product.locator(self.SELECTORS["product_price"])
@@ -560,7 +610,7 @@ class PanagoAutomation:
                         PriceRecord(
                             province=location.province,
                             store_name=location.store_name,
-                            category=category,
+                            category=self._normalize_category(category),
                             product_name=name.strip() if name else "",
                             actual_price=self._parse_price(price_text),
                             raw_price_text=price_text or "",
@@ -569,27 +619,49 @@ class PanagoAutomation:
                         )
                     )
                     # Capture cart price if enabled (for single-price products)
-                    if self.capture_cart_prices:
+                    if self.capture_cart_prices and name:
+                        product_display = name.strip()
+                        self._report_progress(f"🛒 Adding to cart: {product_display}")
                         cart_record = await self._capture_cart_price_for_product(
                             page,
                             product,
-                            name.strip() if name else "",
+                            name.strip(),
                             None,
                             location,
                             category,
                         )
                         if cart_record:
                             prices.append(cart_record)
-                        await self._wait_with_jitter(1000, 2000)
+                            self._report_progress(f"💰 Cart price: ${cart_record.actual_price}")
+                        else:
+                            self._report_progress(f"⚠️ Could not get cart price")
+
+                        # Re-fetch products locator after navigation
+                        products = page.locator(self.SELECTORS["product_card"])
+                        await asyncio.sleep(0.3)
             except Exception as e:
                 logger.warning(
                     "product_extraction_failed",
-                    category=category,
+                    category=self._normalize_category(category),
                     product_index=i,
                     error=str(e),
                 )
 
         return prices
+
+    def _normalize_category(self, category: str) -> str:
+        """Normalize category name for output (e.g., 'pizzas-meat' -> 'pizzas').
+
+        Args:
+            category: Internal category name.
+
+        Returns:
+            Normalized category name for display/comparison.
+        """
+        # Map pizza subcategories back to 'pizzas' for output
+        if category.startswith("pizzas-"):
+            return "pizzas"
+        return category
 
     def _parse_price(self, price_text: Optional[str]) -> Decimal:
         """Parse price string to Decimal.
@@ -643,34 +715,68 @@ class PanagoAutomation:
     # Cart interaction methods for menu vs cart price comparison
 
     async def _click_product(self, page: Page, product_locator) -> bool:
-        """Click a product card to open the product detail modal.
+        """Click the 'Add to Order' button within a product card.
 
         Args:
             page: Playwright page instance.
             product_locator: Locator for the product element.
 
         Returns:
-            True if modal opened successfully, False otherwise.
+            True if modal opened or page navigated successfully, False otherwise.
         """
         try:
-            await product_locator.click()
-            await asyncio.sleep(1)
+            # Log what product we're working with
+            try:
+                element_text = await product_locator.text_content(timeout=1000)
+                element_text = element_text[:80] if element_text else "no text"
+            except:
+                element_text = "could not get text"
+            logger.debug("processing_product", element_preview=element_text)
 
-            # Wait for modal to appear
+            # Scroll product into view first
+            await product_locator.scroll_into_view_if_needed(timeout=2000)
+            await asyncio.sleep(0.3)
+
+            # Find "Add to Order" button within this product
+            add_button = product_locator.locator(self.CART_SELECTORS["add_to_order_button"]).first
+
+            if not await add_button.count():
+                logger.debug("add_to_order_button_not_found")
+                return False
+
+            button_text = await add_button.text_content(timeout=1000)
+            logger.debug("found_add_button", button_text=button_text)
+
+            # Remember current URL to detect navigation
+            original_url = page.url
+
+            # Click the Add to Order button
+            await add_button.click(timeout=2000)
+            logger.debug("clicked_add_to_order")
+            await asyncio.sleep(0.5)
+
+            # Check if we navigated to a new page (product customization page)
+            if page.url != original_url:
+                logger.debug("navigated_to_product_page", url=page.url)
+                await page.wait_for_load_state("domcontentloaded")
+                return True
+
+            # Otherwise, check for modal/popup
             modal_selector = self.CART_SELECTORS["product_modal"]
             try:
-                await page.wait_for_selector(modal_selector, state="visible", timeout=5000)
+                await page.wait_for_selector(modal_selector, state="visible", timeout=2000)
                 logger.debug("product_modal_opened")
                 return True
             except Exception:
-                logger.debug("product_modal_not_found")
-                return False
+                logger.debug("no_modal_after_click", url=page.url)
+                # Even if no modal, maybe item was added directly to cart
+                return True
         except Exception as e:
             logger.warning("click_product_failed", error=str(e))
             return False
 
     async def _select_size(self, page: Page, size: Optional[str]) -> bool:
-        """Select a size option in the product modal.
+        """Select a size option via radio button in the customization panel.
 
         Args:
             page: Playwright page instance.
@@ -680,28 +786,41 @@ class PanagoAutomation:
             True if size was selected, False otherwise.
         """
         try:
+            # Wait a moment for customization panel to load
+            await asyncio.sleep(0.3)
+
+            # Try to find size radio buttons by looking for labels containing size text
+            if size:
+                # Look for radio button or label containing the size name
+                size_patterns = [
+                    f"input[type='radio'][value*='{size}' i]",
+                    f"label:has-text('{size}')",
+                    f"text='{size}'",
+                ]
+                for pattern in size_patterns:
+                    try:
+                        option = page.locator(pattern).first
+                        if await option.count() > 0:
+                            await option.click(timeout=2000)
+                            logger.debug("size_selected", size=size, pattern=pattern)
+                            await asyncio.sleep(0.3)
+                            return True
+                    except:
+                        continue
+
+            # Fallback: try generic size selector
             size_selector = self.CART_SELECTORS["size_option"]
             size_options = page.locator(size_selector)
             count = await size_options.count()
+            logger.debug("size_options_found", count=count)
 
             if count == 0:
                 logger.debug("no_size_options_found")
                 return True  # Product may not have size options
 
-            if size:
-                # Try to find matching size
-                for i in range(count):
-                    option = size_options.nth(i)
-                    text = await option.text_content()
-                    if text and size.lower() in text.lower():
-                        await option.click()
-                        await asyncio.sleep(0.5)
-                        logger.debug("size_selected", size=size)
-                        return True
-
-            # Fallback: click first option
+            # Click first option as fallback
             await size_options.first.click()
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.3)
             logger.debug("size_selected_first_option")
             return True
 
@@ -709,8 +828,36 @@ class PanagoAutomation:
             logger.warning("select_size_failed", error=str(e))
             return False
 
+    async def _select_crust(self, page: Page) -> bool:
+        """Select the first available crust option.
+
+        Args:
+            page: Playwright page instance.
+
+        Returns:
+            True if crust was selected or not needed, False on error.
+        """
+        try:
+            crust_selector = self.CART_SELECTORS["crust_option"]
+            crust_options = page.locator(crust_selector)
+            count = await crust_options.count()
+
+            if count == 0:
+                logger.debug("no_crust_options_found")
+                return True  # Product may not have crust options
+
+            # Click first crust option
+            await crust_options.first.click()
+            await asyncio.sleep(0.3)
+            logger.debug("crust_selected_first_option")
+            return True
+
+        except Exception as e:
+            logger.warning("select_crust_failed", error=str(e))
+            return False
+
     async def _add_to_cart(self, page: Page) -> bool:
-        """Click the Add to Cart button in the product modal.
+        """Click the Add to Cart button in the customization panel.
 
         Args:
             page: Playwright page instance.
@@ -719,16 +866,30 @@ class PanagoAutomation:
             True if item was added to cart, False otherwise.
         """
         try:
-            button_selector = self.CART_SELECTORS["add_to_cart_button"]
-            add_button = page.locator(button_selector).first
+            # Try multiple button patterns
+            button_patterns = [
+                "button:has-text('Add to Cart')",
+                "button:has-text('Add To Cart')",
+                "button:has-text('Add to Order')",
+                "input[type='submit'][value*='Add']",
+                ".add-to-cart",
+                "button[type='submit']",
+            ]
 
-            if await add_button.is_visible():
-                await add_button.click()
-                await asyncio.sleep(2)  # Wait for cart to update
-                logger.debug("added_to_cart")
-                return True
+            for pattern in button_patterns:
+                try:
+                    add_button = page.locator(pattern).first
+                    if await add_button.count() > 0 and await add_button.is_visible():
+                        button_text = await add_button.text_content(timeout=1000)
+                        logger.debug("clicking_add_to_cart", pattern=pattern, text=button_text)
+                        await add_button.click(timeout=2000)
+                        await asyncio.sleep(1)  # Wait for cart to update
+                        logger.debug("added_to_cart")
+                        return True
+                except:
+                    continue
 
-            logger.debug("add_to_cart_button_not_visible")
+            logger.debug("add_to_cart_button_not_found")
             return False
 
         except Exception as e:
@@ -746,31 +907,72 @@ class PanagoAutomation:
             Price as Decimal if found, None otherwise.
         """
         try:
-            # Try to open cart sidebar if needed
-            cart_icon = page.locator(self.CART_SELECTORS["cart_icon"]).first
-            if await cart_icon.is_visible():
-                await cart_icon.click()
-                await asyncio.sleep(1)
-
-            # Find cart items
+            # First check if cart items are already visible (some sites auto-open cart after add)
             cart_items = page.locator(self.CART_SELECTORS["cart_item"])
             count = await cart_items.count()
+            logger.debug("checking_cart_items_visible", count=count)
 
+            # If no cart items visible, try to open cart
+            if count == 0:
+                # Try multiple ways to open the cart
+                cart_openers = [
+                    ".cart-icon",
+                    "[class*='cart']",
+                    "header a[href*='cart']",
+                    ".shopping-cart-icon",
+                    "a[href='/cart']",
+                    ".cart-btn",
+                    ".cart-button",
+                ]
+
+                for selector in cart_openers:
+                    try:
+                        cart_icon = page.locator(selector).first
+                        if await cart_icon.count() > 0:
+                            # Scroll into view first to fix "outside viewport" issue
+                            await cart_icon.scroll_into_view_if_needed(timeout=2000)
+                            await asyncio.sleep(0.2)
+
+                            if await cart_icon.is_visible():
+                                await cart_icon.click(timeout=3000)
+                                logger.debug("clicked_cart_icon", selector=selector)
+                                await asyncio.sleep(0.5)
+                                break
+                    except Exception as e:
+                        logger.debug("cart_opener_failed", selector=selector, error=str(e))
+                        continue
+
+                # Re-check cart items after attempting to open
+                cart_items = page.locator(self.CART_SELECTORS["cart_item"])
+                count = await cart_items.count()
+                logger.debug("cart_items_after_open", count=count)
+
+            # Search for the product in cart items
             for i in range(count):
                 item = cart_items.nth(i)
                 name_elem = item.locator(self.CART_SELECTORS["cart_item_name"])
                 price_elem = item.locator(self.CART_SELECTORS["cart_item_price"])
 
                 if await name_elem.count() > 0:
-                    name = await name_elem.first.text_content()
+                    name = await name_elem.first.text_content(timeout=2000)
                     if name and product_name.lower() in name.lower():
                         if await price_elem.count() > 0:
-                            price_text = await price_elem.first.text_content()
+                            price_text = await price_elem.first.text_content(timeout=2000)
                             price = self._parse_price(price_text)
                             logger.debug("cart_price_found", product=product_name, price=str(price))
                             return price
 
-            logger.debug("cart_price_not_found", product=product_name)
+            # If we couldn't find by name, try to get the most recent item's price
+            if count > 0:
+                last_item = cart_items.nth(count - 1)
+                price_elem = last_item.locator(self.CART_SELECTORS["cart_item_price"])
+                if await price_elem.count() > 0:
+                    price_text = await price_elem.first.text_content(timeout=2000)
+                    price = self._parse_price(price_text)
+                    logger.debug("cart_price_from_last_item", product=product_name, price=str(price))
+                    return price
+
+            logger.debug("cart_price_not_found", product=product_name, items_checked=count)
             return None
 
         except Exception as e:
@@ -788,7 +990,7 @@ class PanagoAutomation:
             clear_btn = page.locator(self.CART_SELECTORS["clear_cart"])
             if await clear_btn.count() > 0 and await clear_btn.first.is_visible():
                 await clear_btn.first.click()
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.5)
                 logger.debug("cart_cleared_via_button")
                 return
 
@@ -799,7 +1001,7 @@ class PanagoAutomation:
                 if await remove_buttons.count() == 0:
                     break
                 await remove_buttons.first.click()
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.3)
 
             logger.debug("cart_cleared_items_removed")
 
@@ -818,7 +1020,7 @@ class PanagoAutomation:
 
             if await close_btn.is_visible():
                 await close_btn.click()
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.3)
                 logger.debug("modal_closed")
 
         except Exception as e:
@@ -835,7 +1037,7 @@ class PanagoAutomation:
     ) -> Optional[PriceRecord]:
         """Capture price from cart for a single product.
 
-        Flow: click product -> select size -> add to cart -> read price -> clear cart -> close modal
+        Flow: click product -> select size -> add to cart -> read price -> clear cart -> go back
 
         Args:
             page: Playwright page instance.
@@ -848,17 +1050,28 @@ class PanagoAutomation:
         Returns:
             PriceRecord with cart price, or None if capture failed.
         """
+        # Remember the category URL so we can return to it
+        category_url = self.CATEGORY_URLS.get(category, f"/menu/{category}")
+        full_category_url = f"{self.base_url}{category_url}"
+        original_url = page.url
+
         try:
-            # Open product modal
+            # Click "Add to Order" to open customization panel
             if not await self._click_product(page, product_locator):
                 return None
 
             # Select size if applicable
             await self._select_size(page, size)
 
-            # Add to cart
+            # Select crust (first available option)
+            await self._select_crust(page)
+
+            # Click final "Add to Cart" button
             if not await self._add_to_cart(page):
                 await self._close_modal(page)
+                # Navigate back if we're on a different page
+                if page.url != original_url:
+                    await page.goto(full_category_url, wait_until="domcontentloaded", timeout=10000)
                 return None
 
             # Get price from cart
@@ -870,11 +1083,17 @@ class PanagoAutomation:
             # Close any open modals
             await self._close_modal(page)
 
+            # Navigate back to category page if we ended up elsewhere
+            if page.url != original_url and not page.url.startswith(full_category_url):
+                logger.debug("navigating_back_to_category", from_url=page.url, to_url=full_category_url)
+                await page.goto(full_category_url, wait_until="domcontentloaded", timeout=10000)
+                await asyncio.sleep(0.5)
+
             if cart_price is not None:
                 return PriceRecord(
                     province=location.province,
                     store_name=location.store_name,
-                    category=category,
+                    category=self._normalize_category(category),
                     product_name=product_name,
                     actual_price=cart_price,
                     raw_price_text=f"${cart_price}",
@@ -890,7 +1109,12 @@ class PanagoAutomation:
                 product=product_name,
                 error=str(e),
             )
-            # Try to clean up
-            await self._clear_cart(page)
-            await self._close_modal(page)
+            # Try to clean up and return to category
+            try:
+                await self._clear_cart(page)
+                await self._close_modal(page)
+                if page.url != original_url:
+                    await page.goto(full_category_url, wait_until="domcontentloaded", timeout=10000)
+            except:
+                pass
             return None
