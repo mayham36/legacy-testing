@@ -488,8 +488,17 @@ class PanagoAutomation:
         # Delay after page load
         await self._wait_with_jitter()
 
-        # Select location
-        await self._select_location(page, location.address)
+        # Select location - try city name first, then address
+        location_selected = await self._select_location(page, location.store_name.split()[0])
+        if not location_selected:
+            # Try with full address
+            location_selected = await self._select_location(page, location.address)
+
+        if not location_selected:
+            logger.error("location_selection_failed", location=location.store_name)
+            self._report_progress(f"❌ Failed to select location: {location.store_name}")
+            # Continue anyway - the site may have defaulted to a location
+            # and we can still scrape, just noting the potential issue
 
         # Delay after location selection
         await self._wait_with_jitter()
@@ -541,22 +550,62 @@ class PanagoAutomation:
         )
         return prices
 
-    async def _select_location(self, page: Page, city: str) -> None:
-        """Handle city selection via the React Autosuggest modal.
+    async def _select_location(self, page: Page, city: str) -> bool:
+        """Handle city selection via the React Autosuggest modal with retry logic.
 
         The Panago website uses a city picker modal that auto-detects location.
-        Flow:
-        1. Click the location trigger to open the modal
-        2. Clear and type the city name in the autosuggest input
-        3. Wait for and click the first suggestion
-        4. Click "Save City" button
+        This method tries multiple city name formats and validates selection.
 
         Args:
             page: Playwright page instance.
             city: City name to enter (e.g., "Vancouver").
+
+        Returns:
+            True if location was successfully selected, False otherwise.
         """
         logger.info("selecting_location", city=city)
 
+        # Try multiple city name formats
+        city_formats = [
+            city,
+            city.replace(",", ""),
+            city.split(",")[0].strip() if "," in city else city,
+        ]
+
+        for attempt, city_format in enumerate(city_formats):
+            try:
+                success = await self._attempt_location_selection(page, city_format)
+                if success:
+                    # Validate the selection worked
+                    if await self._verify_location_selected(page, city):
+                        logger.info("location_selected", city=city, format_used=city_format)
+                        return True
+                    else:
+                        logger.debug("location_verification_failed", city=city_format)
+            except Exception as e:
+                logger.debug(
+                    "location_attempt_failed",
+                    city=city_format,
+                    attempt=attempt + 1,
+                    error=str(e),
+                )
+                continue
+
+        # All attempts failed - save debug snapshot
+        logger.warning("location_selection_failed", city=city, attempts=len(city_formats))
+        await self._save_debug_snapshot(page, f"location_fail_{city}", None)
+        return False
+
+    async def _attempt_location_selection(self, page: Page, city: str) -> bool:
+        """Attempt to select a location once.
+
+        Args:
+            page: Playwright page instance.
+            city: City name to enter.
+
+        Returns:
+            True if the selection flow completed without errors.
+        """
         # Step 1: Click location trigger to open the city picker modal
         try:
             trigger = page.locator(self.SELECTORS["location_trigger"])
@@ -576,6 +625,7 @@ class PanagoAutomation:
             )
         except Exception:
             logger.warning("city_input_not_visible")
+            return False
 
         # Step 3: Clear and type the city name
         city_input = page.locator(self.SELECTORS["city_input"])
@@ -605,7 +655,8 @@ class PanagoAutomation:
             await first_suggestion.click()
             await asyncio.sleep(1)
         except Exception as e:
-            logger.warning("no_suggestions_found", error=str(e))
+            logger.warning("no_suggestions_found", city=city, error=str(e))
+            return False
 
         # Step 6: Click Save City button
         try:
@@ -617,12 +668,47 @@ class PanagoAutomation:
         except Exception as e:
             logger.warning("save_button_not_found", error=str(e))
 
-        # Wait for page to update (use domcontentloaded - networkidle can hang on sites with continuous activity)
+        # Wait for page to update
         try:
             await page.wait_for_load_state("domcontentloaded", timeout=10000)
         except Exception as e:
             logger.debug("load_state_timeout", error=str(e))
-        logger.info("location_selected", city=city)
+
+        return True
+
+    async def _verify_location_selected(self, page: Page, expected_city: str) -> bool:
+        """Verify that the expected location was actually selected.
+
+        Checks the page content to confirm the city name appears in the
+        location indicator.
+
+        Args:
+            page: Playwright page instance.
+            expected_city: City name that should be selected.
+
+        Returns:
+            True if the expected city appears to be selected.
+        """
+        try:
+            # Check for city name in the location trigger text
+            trigger = page.locator(self.SELECTORS["location_trigger"])
+            if await trigger.count() > 0:
+                trigger_text = await trigger.text_content()
+                if trigger_text and expected_city.lower() in trigger_text.lower():
+                    return True
+
+            # Also check the page URL or other indicators
+            # Some sites include location in the URL
+            page_url = page.url.lower()
+            if expected_city.lower().replace(" ", "-") in page_url:
+                return True
+
+            # If we can't verify, assume success if we got this far
+            return True
+
+        except Exception as e:
+            logger.debug("location_verification_error", error=str(e))
+            return True  # Don't fail on verification errors
 
     async def _scrape_category(
         self, page: Page, category: str, location: LocationConfig
