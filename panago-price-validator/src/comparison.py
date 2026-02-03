@@ -15,8 +15,10 @@ def normalize_product_name(name: str) -> str:
     Handles:
     - Trailing/leading whitespace
     - "NEW " prefix in master documents
+    - Common beverage brand prefixes (Bubly, Organic Juice)
     - Multiple internal spaces
     - Case normalization
+    - Hyphen/space normalization (e.g., "7 Up" matches "7-Up")
 
     Args:
         name: Raw product name.
@@ -31,12 +33,29 @@ def normalize_product_name(name: str) -> str:
     name = " ".join(name.split())  # Normalize internal whitespace
 
     # Remove common prefixes (case-insensitive)
-    prefixes_to_remove = ["NEW ", "new ", "New "]
+    # Order matters - check longer prefixes first
+    prefixes_to_remove = [
+        # Beverage brand prefixes
+        "Organic Juice - ",
+        "organic juice - ",
+        "Bubly ",
+        "bubly ",
+        # Master document prefixes
+        "NEW ",
+        "new ",
+        "New ",
+    ]
     for prefix in prefixes_to_remove:
         if name.startswith(prefix):
             name = name[len(prefix):]
+            break  # Only remove one prefix
 
-    return name.lower()
+    # Normalize hyphens and spaces for matching (e.g., "7 Up" vs "7-Up")
+    # Replace hyphens with spaces, then normalize
+    name_normalized = name.replace("-", " ")
+    name_normalized = " ".join(name_normalized.split())
+
+    return name_normalized.lower()
 
 
 def find_best_match(
