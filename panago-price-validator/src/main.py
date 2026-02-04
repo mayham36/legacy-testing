@@ -325,6 +325,7 @@ def main() -> int:
             "ended_at": ended_at.isoformat(),
             "elapsed_seconds": elapsed_seconds,
             "locations_count": len(set(p.store_name for p in actual_prices)) if actual_prices else 0,
+            "cart_capture_enabled": args.cart_prices,
         }
 
         # Save results

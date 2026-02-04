@@ -176,6 +176,9 @@ def save_results(
             products = len(results.get("details_df", pd.DataFrame()))
             avg_per_loc = elapsed / locations if locations > 0 else 0
 
+            cart_enabled = timing_info.get("cart_capture_enabled", False)
+            cart_status = "YES" if cart_enabled else "NO"
+
             exec_data = {
                 "Metric": [
                     "Start Time",
@@ -185,6 +188,7 @@ def save_results(
                     "Locations Tested",
                     "Products Compared",
                     "Avg Time per Location",
+                    "Cart Capture Enabled",
                 ],
                 "Value": [
                     timing_info.get("started_at", "N/A"),
@@ -194,6 +198,7 @@ def save_results(
                     str(locations),
                     str(products),
                     f"{avg_per_loc:.1f}s",
+                    cart_status,
                 ],
             }
             exec_df = pd.DataFrame(exec_data)

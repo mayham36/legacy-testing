@@ -411,6 +411,7 @@ async def run_validation_task(job_id: str, selected_cities: list[str], capture_c
             "ended_at": ended_at.isoformat(),
             "elapsed_seconds": elapsed_seconds,
             "locations_count": len(locations),
+            "cart_capture_enabled": capture_cart,
         }
 
         # Save results with timing info
