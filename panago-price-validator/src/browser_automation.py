@@ -53,8 +53,11 @@ class PanagoAutomation:
     # Note: "Sides" contains wings, breadstuff, etc. on the actual site
     # Pizza has multiple subcategories that need to be scraped separately
     CATEGORIES = [
+        "pizzas-basics",       # Everyday Value pizzas
         "pizzas-meat",
+        "pizzas-chicken",      # Chicken pizzas (separate from meat)
         "pizzas-veggie",
+        "pizzas-shrimp",       # Shrimp pizzas
         "pizzas-plant-based",
         "salads",
         "sides",
@@ -65,8 +68,11 @@ class PanagoAutomation:
 
     # Menu URL paths for each category
     CATEGORY_URLS = {
+        "pizzas-basics": "/menu/pizzas/basics",  # Everyday Value pizzas
         "pizzas-meat": "/menu/pizzas/meat",
+        "pizzas-chicken": "/menu/pizzas/chicken",
         "pizzas-veggie": "/menu/pizzas/veggie",
+        "pizzas-shrimp": "/menu/pizzas/shrimp",
         "pizzas-plant-based": "/menu/pizzas/plant_based",
         "salads": "/menu/salads",
         "sides": "/menu/sides",  # Contains wings, breadstuff, etc.
@@ -101,6 +107,8 @@ class PanagoAutomation:
         "category_link": "ul.menu li a[href*='{category}']",
         # Loading states
         "loading_spinner": ".loading, .spinner, [class*='loading']",
+        # Collapsible sections (sides page has expandable product groups)
+        "collapsible_toggle": ".collapsable .toggle, .collapsable > h4, .product-group-header",
     }
 
     # Category-specific selectors - different page layouts need different selectors
@@ -160,6 +168,7 @@ class PanagoAutomation:
         if capture_cart_prices:
             from .cart_capture import CartPriceCapture, CART_SELECTORS
             self.cart = CartPriceCapture(CART_SELECTORS, self._parse_price)
+            logger.info("cart_capture_enabled", message="Cart price capture is ENABLED")
 
     def _report_progress(self, message: str) -> None:
         """Report progress via callback if available."""
@@ -254,6 +263,47 @@ class PanagoAutomation:
             Dict of selectors for the category.
         """
         return self.CATEGORY_SELECTORS.get(category, self.CATEGORY_SELECTORS["default"])
+
+    async def _expand_collapsible_sections(self, page: Page, category: str) -> None:
+        """Expand all collapsible sections on the page.
+
+        Some categories like 'sides' have collapsible product groups that need
+        to be expanded before scraping.
+
+        Args:
+            page: Playwright page instance.
+            category: Current category being scraped.
+        """
+        try:
+            # Look for collapsible toggle elements
+            toggle_selector = self.SELECTORS["collapsible_toggle"]
+            toggles = page.locator(toggle_selector)
+            count = await toggles.count()
+
+            if count == 0:
+                return
+
+            logger.info("expanding_collapsible_sections", category=category, count=count)
+            self._report_progress(f"📂 Expanding {count} sections in {category}")
+
+            for i in range(count):
+                try:
+                    toggle = toggles.nth(i)
+                    # Check if section is collapsed (not already expanded)
+                    # Look for aria-expanded or class indicators
+                    is_visible = await toggle.is_visible()
+                    if is_visible:
+                        await toggle.click(timeout=2000)
+                        await asyncio.sleep(0.3)  # Wait for animation
+                except Exception as e:
+                    logger.debug("toggle_click_failed", index=i, error=str(e))
+                    continue
+
+            # Wait for content to load after expanding
+            await asyncio.sleep(0.5)
+
+        except Exception as e:
+            logger.debug("expand_collapsible_failed", category=category, error=str(e))
 
     def _is_garbage_text(self, text: str) -> bool:
         """Check if text is garbage (UI elements, descriptions, etc.)."""
@@ -904,6 +954,9 @@ class PanagoAutomation:
 
         # Wait for page content to load (extra time for JavaScript rendering)
         await asyncio.sleep(2)  # Give React/JavaScript time to render
+
+        # Expand collapsible sections if present (sides page has these)
+        await self._expand_collapsible_sections(page, category)
 
         # Get category-specific selectors
         cat_selectors = self._get_category_selectors(category)

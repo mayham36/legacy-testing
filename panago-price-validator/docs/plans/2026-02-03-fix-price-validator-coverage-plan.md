@@ -299,6 +299,28 @@ The Panago website may change its DOM structure. Consider:
 - [ ] Test each pricing level: `--pl PL1`, `--pl PL2`, etc.
 - [ ] Verify name normalization with known mismatches
 
+## Updates (2026-02-03)
+
+### Added Missing Pizza Categories
+
+Added three missing pizza subcategories:
+- `pizzas-basics` → `/menu/pizzas/basics` - Contains Everyday Value pizzas (Everyday Pep, Everyday Hawaiian, Everyday Meat Trio, Everyday Chicken Melt, Everyday Veggie)
+- `pizzas-chicken` → `/menu/pizzas/chicken` - Chicken pizzas
+- `pizzas-shrimp` → `/menu/pizzas/shrimp` - Shrimp pizzas
+
+### Added Collapsible Section Support
+
+The Sides page has collapsible product groups. Added `_expand_collapsible_sections()` method to automatically expand all collapsed sections before scraping.
+
+### Enhanced Cart Capture Logging
+
+Added `logger.info()` calls at key points in cart capture flow:
+- When cart capture starts for a product
+- When click product fails
+- When add to cart fails
+- When cart price is successfully captured
+- When cart price is not found
+
 ## Files to Modify
 
 | File | Changes |

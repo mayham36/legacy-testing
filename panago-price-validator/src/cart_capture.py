@@ -398,9 +398,17 @@ class CartPriceCapture:
         full_category_url = f"{base_url}{category_url}"
         original_url = page.url
 
+        logger.info(
+            "cart_capture_starting",
+            product=product_name,
+            size=size,
+            url=original_url,
+        )
+
         try:
             # Click "Add to Order" to open customization panel
             if not await self._click_product(page, product_locator):
+                logger.warning("cart_capture_click_product_failed", product=product_name)
                 return None
 
             # Select size if applicable
@@ -411,6 +419,7 @@ class CartPriceCapture:
 
             # Click final "Add to Cart" button
             if not await self._add_to_cart(page):
+                logger.warning("cart_capture_add_to_cart_failed", product=product_name)
                 await self._close_modal(page)
                 # Navigate back if we're on a different page
                 if page.url != original_url:
@@ -431,6 +440,11 @@ class CartPriceCapture:
                 logger.debug("navigating_back_to_category", from_url=page.url, to_url=full_category_url)
                 await page.goto(full_category_url, wait_until="domcontentloaded", timeout=10000)
                 await asyncio.sleep(0.5)
+
+            if cart_price is not None:
+                logger.info("cart_capture_success", product=product_name, price=str(cart_price))
+            else:
+                logger.warning("cart_capture_price_not_found", product=product_name)
 
             return cart_price
 
