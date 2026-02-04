@@ -255,6 +255,30 @@ class PanagoAutomation:
         """
         return self.CATEGORY_SELECTORS.get(category, self.CATEGORY_SELECTORS["default"])
 
+    def _is_garbage_text(self, text: str) -> bool:
+        """Check if text is garbage (UI elements, descriptions, etc.)."""
+        if not text:
+            return True
+        text_lower = text.lower()
+        # Known garbage patterns
+        garbage_patterns = [
+            "add to order", "add to cart", "qty:", "quantity",
+            "add a dip", "includes dip", "dip included",
+            "lightly breaded", "tex-mex seasoning", "drizzle",
+            "organic tomato sauce", "mozzarella", "cheddar",
+            "romaine lettuce", "parmesan", "croutons",
+        ]
+        for pattern in garbage_patterns:
+            if pattern in text_lower:
+                return True
+        # Check if text contains price embedded (like "BBQ$11.50...")
+        if re.search(r"\$\d+\.?\d*", text):
+            return True
+        # Check if text is too long (likely a description)
+        if len(text) > 50:
+            return True
+        return False
+
     async def _extract_product_name(self, product, selectors: dict) -> Optional[str]:
         """Extract full product name using multiple strategies.
 
@@ -289,7 +313,7 @@ class PanagoAutomation:
                 locator = product.locator(selector)
                 if await locator.count() > 0:
                     text = await locator.first.text_content(timeout=3000)
-                    if text and len(text.strip()) > 2:
+                    if text and len(text.strip()) > 2 and not self._is_garbage_text(text.strip()):
                         name = text.strip()
                         break
             except Exception:
@@ -303,16 +327,16 @@ class PanagoAutomation:
                 if full_text:
                     # Extract first meaningful line (product name is usually first)
                     lines = [l.strip() for l in full_text.split("\n") if l.strip()]
-                    # Find first line that's not a price
+                    # Find first line that's not a price or garbage
                     for line in lines:
                         if not line.startswith("$") and not re.match(r"^\d+\.\d{2}$", line):
-                            if len(line) > len(name):
+                            if len(line) > len(name) and not self._is_garbage_text(line):
                                 name = line
                             break
             except Exception:
                 pass
 
-        # Strategy 3: If still no name, try full text extraction
+        # Strategy 3: If still no name, try full text extraction with strict filtering
         if not name:
             try:
                 full_text = await product.text_content(timeout=3000)
@@ -321,8 +345,9 @@ class PanagoAutomation:
                     lines = [l.strip() for l in full_text.split("\n") if l.strip()]
                     for line in lines:
                         if not line.startswith("$") and not re.match(r"^\d+\.\d{2}$", line):
-                            name = line
-                            break
+                            if not self._is_garbage_text(line):
+                                name = line
+                                break
             except Exception:
                 pass
 

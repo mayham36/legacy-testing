@@ -19,6 +19,7 @@ def normalize_product_name(name: str) -> str:
     - Trailing/leading whitespace
     - "NEW " prefix in master documents
     - Common beverage brand prefixes (Bubly, Organic Juice)
+    - Common suffixes (Salad, Pizza, etc.) for matching flexibility
     - Multiple internal spaces
     - Case normalization
     - Hyphen/space normalization (e.g., "7 Up" matches "7-Up")
@@ -52,6 +53,19 @@ def normalize_product_name(name: str) -> str:
         if name.startswith(prefix):
             name = name[len(prefix):]
             break  # Only remove one prefix
+
+    # Remove common suffixes for flexible matching
+    # e.g., "Caesar" should match "Caesar Salad"
+    suffixes_to_remove = [
+        " Salad",
+        " salad",
+        " Pizza",
+        " pizza",
+    ]
+    for suffix in suffixes_to_remove:
+        if name.endswith(suffix):
+            name = name[:-len(suffix)]
+            break  # Only remove one suffix
 
     # Normalize hyphens and spaces for matching (e.g., "7 Up" vs "7-Up")
     # Replace hyphens with spaces, then normalize
