@@ -126,6 +126,7 @@ def save_results(
     output_dir: Path,
     menu_vs_cart_results: dict | None = None,
     all_prices_results: dict | None = None,
+    timing_info: dict | None = None,
 ) -> Path:
     """Save comparison results to Excel with security controls.
 
@@ -136,6 +137,8 @@ def save_results(
             Contains comparison_df and mismatches_df.
         all_prices_results: Optional dictionary with comprehensive comparison results.
             Contains full_comparison_df and issues_df with expected, menu, and cart prices.
+        timing_info: Optional dictionary with execution timing data.
+            Contains started_at, ended_at, elapsed_seconds, locations_count.
 
     Returns:
         Path to the created output file.
@@ -164,6 +167,43 @@ def save_results(
         worksheet = writer.sheets["Summary"]
         for col_num, value in enumerate(summary_df.columns.values):
             worksheet.write(0, col_num, value, header_format)
+
+        # Execution Info sheet (timing data)
+        if timing_info:
+            elapsed = timing_info.get("elapsed_seconds", 0)
+            elapsed_str = f"{int(elapsed // 60)}m {int(elapsed % 60)}s"
+            locations = timing_info.get("locations_count", 0)
+            products = len(results.get("details_df", pd.DataFrame()))
+            avg_per_loc = elapsed / locations if locations > 0 else 0
+
+            exec_data = {
+                "Metric": [
+                    "Start Time",
+                    "End Time",
+                    "Duration",
+                    "Duration (seconds)",
+                    "Locations Tested",
+                    "Products Compared",
+                    "Avg Time per Location",
+                ],
+                "Value": [
+                    timing_info.get("started_at", "N/A"),
+                    timing_info.get("ended_at", "N/A"),
+                    elapsed_str,
+                    f"{elapsed:.1f}",
+                    str(locations),
+                    str(products),
+                    f"{avg_per_loc:.1f}s",
+                ],
+            }
+            exec_df = pd.DataFrame(exec_data)
+            exec_df.to_excel(writer, sheet_name="Execution Info", index=False)
+            worksheet = writer.sheets["Execution Info"]
+            for col_num, value in enumerate(exec_df.columns.values):
+                worksheet.write(0, col_num, value, header_format)
+            # Widen columns for readability
+            worksheet.set_column(0, 0, 22)
+            worksheet.set_column(1, 1, 30)
 
         # Details sheet
         details_df = results["details_df"]

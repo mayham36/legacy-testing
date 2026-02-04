@@ -2,6 +2,7 @@
 import argparse
 import logging
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import structlog
@@ -285,6 +286,7 @@ def main() -> int:
             )
 
         # Run browser automation
+        started_at = datetime.now()
         automation = PanagoAutomation(
             config,
             args.config,
@@ -294,7 +296,9 @@ def main() -> int:
             capture_cart_prices=args.cart_prices,
         )
         actual_prices = automation.run_price_collection()
-        logger.info("collected_actual_prices", count=len(actual_prices))
+        ended_at = datetime.now()
+        elapsed_seconds = (ended_at - started_at).total_seconds()
+        logger.info("collected_actual_prices", count=len(actual_prices), elapsed_seconds=elapsed_seconds)
 
         # Compare prices (expected vs actual menu prices)
         results = compare_prices(
@@ -315,11 +319,20 @@ def main() -> int:
                 summary=menu_vs_cart_results["summary"],
             )
 
+        # Build timing info
+        timing_info = {
+            "started_at": started_at.isoformat(),
+            "ended_at": ended_at.isoformat(),
+            "elapsed_seconds": elapsed_seconds,
+            "locations_count": len(set(p.store_name for p in actual_prices)) if actual_prices else 0,
+        }
+
         # Save results
         output_path = save_results(
             results,
             config.output_dir,
             menu_vs_cart_results=menu_vs_cart_results,
+            timing_info=timing_info,
         )
 
         logger.info(
@@ -329,9 +342,11 @@ def main() -> int:
         )
 
         # Print summary to console
+        elapsed_str = f"{int(elapsed_seconds // 60)}m {int(elapsed_seconds % 60)}s"
         print(f"\n{'=' * 60}")
         print("VALIDATION COMPLETE")
         print(f"{'=' * 60}")
+        print(f"Duration: {elapsed_str}")
         print(f"Summary: {results['summary']}")
 
         if menu_vs_cart_results:

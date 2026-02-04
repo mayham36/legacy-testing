@@ -117,6 +117,9 @@
                     <div class="progress-bar" id="progressBar" style="width: 0%"></div>
                 </div>
                 <p class="progress-message" id="progressMessage">Starting...</p>
+                <p class="progress-time" id="progressTime" style="color: #666; font-size: 0.9em; margin-top: 8px;">
+                    Elapsed: <span id="elapsedTime">0:00</span>
+                </p>
                 <div class="progress-spinner" id="spinner">
                     <div class="spinner"></div>
                 </div>
@@ -128,6 +131,7 @@
             <div class="results-card">
                 <span class="material-icons result-icon success">check_circle</span>
                 <h3>Validation Complete</h3>
+                <p class="result-time" id="resultTime" style="color: #666; font-size: 0.9em; margin-bottom: 8px;"></p>
                 <p class="result-summary" id="resultSummary"></p>
                 <button type="button" class="btn btn-primary" onclick="downloadResults()">
                     <span class="material-icons">download</span>
@@ -304,12 +308,30 @@
         function updateProgress(data) {
             document.getElementById('progressBar').style.width = data.progress + '%';
             document.getElementById('progressMessage').textContent = data.message;
+
+            // Update elapsed time
+            if (data.elapsed_seconds !== undefined) {
+                const elapsed = Math.floor(data.elapsed_seconds);
+                const mins = Math.floor(elapsed / 60);
+                const secs = elapsed % 60;
+                document.getElementById('elapsedTime').textContent =
+                    mins + ':' + secs.toString().padStart(2, '0');
+            }
         }
 
         function showResults(data) {
             document.getElementById('progressSection').classList.add('hidden');
             document.getElementById('resultsSection').classList.remove('hidden');
             document.getElementById('resultSummary').textContent = data.message;
+
+            // Display final elapsed time
+            if (data.elapsed_seconds !== undefined) {
+                const elapsed = Math.floor(data.elapsed_seconds);
+                const mins = Math.floor(elapsed / 60);
+                const secs = elapsed % 60;
+                document.getElementById('resultTime').textContent =
+                    'Completed in ' + mins + 'm ' + secs + 's';
+            }
         }
 
         function showError(message) {

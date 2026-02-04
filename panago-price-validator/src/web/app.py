@@ -244,6 +244,9 @@ async def run_validation(request: Request, background_tasks: BackgroundTasks, us
             "result_file": None,
             "error": None,
             "created_at": datetime.now().isoformat(),
+            "started_at": None,
+            "ended_at": None,
+            "elapsed_seconds": 0,
         }
 
     # Start background task
@@ -261,7 +264,8 @@ async def update_job(job_id: str, **updates):
 
 async def run_validation_task(job_id: str, selected_cities: list[str], capture_cart: bool = False):
     """Background task to run the validation."""
-    await update_job(job_id, status="running", message="Loading configuration...", progress=5)
+    started_at = datetime.now()
+    await update_job(job_id, status="running", message="Loading configuration...", progress=5, started_at=started_at.isoformat())
 
     try:
         # Parse selected cities (format: "PL:city" for pricing levels)
@@ -399,15 +403,27 @@ async def run_validation_task(job_id: str, selected_cities: list[str], capture_c
 
         await update_job(job_id, message="Saving results...", progress=90)
 
-        # Save results
+        # Calculate timing
+        ended_at = datetime.now()
+        elapsed_seconds = (ended_at - started_at).total_seconds()
+        timing_info = {
+            "started_at": started_at.isoformat(),
+            "ended_at": ended_at.isoformat(),
+            "elapsed_seconds": elapsed_seconds,
+            "locations_count": len(locations),
+        }
+
+        # Save results with timing info
         output_path = save_results(
             results,
             config.output_dir,
             menu_vs_cart_results=menu_vs_cart_results,
             all_prices_results=all_prices_results,
+            timing_info=timing_info,
         )
 
-        # Build summary message
+        # Build summary message with timing
+        elapsed_str = f"{int(elapsed_seconds // 60)}m {int(elapsed_seconds % 60)}s"
         summary_parts = [results['summary']]
         if all_prices_results:
             summary_parts.append(all_prices_results['summary'])
@@ -419,7 +435,9 @@ async def run_validation_task(job_id: str, selected_cities: list[str], capture_c
             status="completed",
             message=f"Complete! {' | '.join(summary_parts)}",
             progress=100,
-            result_file=str(output_path)
+            result_file=str(output_path),
+            ended_at=ended_at.isoformat(),
+            elapsed_seconds=elapsed_seconds,
         )
 
     except Exception as e:
@@ -447,6 +465,11 @@ async def stream_status(job_id: str):
                     yield f"data: {{'error': 'Job not found'}}\n\n"
                     break
                 job = jobs[job_id].copy()
+
+            # Calculate elapsed time dynamically for running jobs
+            if job["status"] == "running" and job.get("started_at"):
+                started = datetime.fromisoformat(job["started_at"])
+                job["elapsed_seconds"] = (datetime.now() - started).total_seconds()
 
             yield f"data: {json.dumps(job)}\n\n"
 
