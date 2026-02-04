@@ -4,12 +4,14 @@ import json
 import os
 import re
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
+import aiofiles
 import yaml
 from fastapi import Depends, FastAPI, HTTPException, Request, BackgroundTasks, Security, UploadFile, File
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.security import APIKeyHeader
 from fastapi.staticfiles import StaticFiles
@@ -23,6 +25,17 @@ from ..config_loader import load_settings
 from ..master_parser import MasterDocumentParser, load_master_document
 
 app = FastAPI(title="Panago Price Validator", version="1.0.0")
+
+# CORS configuration
+allowed_origins = os.getenv("CORS_ORIGINS", "http://localhost:8000").split(",")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "DELETE"],
+    allow_headers=["*"],
+)
 
 # API Key authentication
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
@@ -61,15 +74,33 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 jobs: dict[str, dict] = {}
 jobs_lock = asyncio.Lock()
 
+# Rate limiting constants
+MAX_JOBS = int(os.getenv("MAX_JOBS", "50"))
+MAX_CONCURRENT_JOBS = int(os.getenv("MAX_CONCURRENT_JOBS", "5"))
+JOB_EXPIRY_HOURS = int(os.getenv("JOB_EXPIRY_HOURS", "24"))
 
-def load_cities_from_config() -> dict[str, list[dict]]:
+
+async def cleanup_old_jobs() -> int:
+    """Remove jobs older than JOB_EXPIRY_HOURS. Must be called with jobs_lock held."""
+    now = datetime.now()
+    expired = [
+        jid for jid, job in jobs.items()
+        if (now - datetime.fromisoformat(job.get("created_at", now.isoformat()))).total_seconds() > JOB_EXPIRY_HOURS * 3600
+    ]
+    for jid in expired:
+        del jobs[jid]
+    return len(expired)
+
+
+async def load_cities_from_config() -> dict[str, list[dict]]:
     """Load cities grouped by province from locations.yaml."""
     locations_path = CONFIG_DIR / "locations.yaml"
     if not locations_path.exists():
         return {}
 
-    with open(locations_path) as f:
-        data = yaml.safe_load(f)
+    async with aiofiles.open(locations_path, 'r') as f:
+        content = await f.read()
+        data = yaml.safe_load(content)
 
     provinces = data.get("provinces", {})
 
@@ -96,39 +127,41 @@ def quoted_str_representer(dumper, data):
 yaml.add_representer(QuotedString, quoted_str_representer)
 
 
-def load_pricing_levels() -> dict[str, dict]:
+async def load_pricing_levels() -> dict[str, dict]:
     """Load pricing levels from config file."""
     pl_path = CONFIG_DIR / "pricing_levels.yaml"
     if not pl_path.exists():
         return {}
 
-    with open(pl_path) as f:
-        data = yaml.safe_load(f)
+    async with aiofiles.open(pl_path, 'r') as f:
+        content = await f.read()
+        data = yaml.safe_load(content)
 
     return data.get("pricing_levels", {})
 
 
-def get_master_info() -> Optional[dict]:
+async def get_master_info() -> Optional[dict]:
     """Get info about the currently loaded master document."""
     if not MASTER_INFO_FILE.exists():
         return None
 
     try:
-        with open(MASTER_INFO_FILE) as f:
-            return json.load(f)
+        async with aiofiles.open(MASTER_INFO_FILE, 'r') as f:
+            content = await f.read()
+            return json.loads(content)
     except (json.JSONDecodeError, IOError):
         return None
 
 
-def save_master_info(info: dict) -> None:
+async def save_master_info(info: dict) -> None:
     """Save master document info."""
-    with open(MASTER_INFO_FILE, "w") as f:
-        json.dump(info, f, indent=2)
+    async with aiofiles.open(MASTER_INFO_FILE, "w") as f:
+        await f.write(json.dumps(info, indent=2))
 
 
-def get_current_master_path() -> Optional[Path]:
+async def get_current_master_path() -> Optional[Path]:
     """Get the path to the currently loaded master document."""
-    info = get_master_info()
+    info = await get_master_info()
     if info and "path" in info:
         path = Path(info["path"])
         if path.exists():
@@ -136,15 +169,16 @@ def get_current_master_path() -> Optional[Path]:
     return None
 
 
-def save_cities_to_config(provinces: dict[str, list[dict]]) -> None:
+async def save_cities_to_config(provinces: dict[str, list[dict]]) -> None:
     """Save cities to locations.yaml, preserving other config like categories."""
     locations_path = CONFIG_DIR / "locations.yaml"
 
     # Load existing config to preserve other sections (like categories)
     existing_data = {}
     if locations_path.exists():
-        with open(locations_path) as f:
-            existing_data = yaml.safe_load(f) or {}
+        async with aiofiles.open(locations_path, 'r') as f:
+            content = await f.read()
+            existing_data = yaml.safe_load(content) or {}
 
     # Quote province codes that YAML might interpret as booleans (ON, NO, etc.)
     # See: https://yaml.org/type/bool.html
@@ -158,15 +192,15 @@ def save_cities_to_config(provinces: dict[str, list[dict]]) -> None:
     # Update provinces section
     existing_data["provinces"] = quoted_provinces
 
-    with open(locations_path, "w") as f:
-        yaml.dump(existing_data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+    async with aiofiles.open(locations_path, "w") as f:
+        await f.write(yaml.dump(existing_data, default_flow_style=False, allow_unicode=True, sort_keys=False))
 
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     """Render the main UI with city selection tiles."""
-    pricing_levels = load_pricing_levels()
-    master_info = get_master_info()
+    pricing_levels = await load_pricing_levels()
+    master_info = await get_master_info()
     return templates.TemplateResponse(
         "index.html",
         {
@@ -190,6 +224,17 @@ async def run_validation(request: Request, background_tasks: BackgroundTasks, us
     # Create job ID
     job_id = str(uuid.uuid4())[:8]
     async with jobs_lock:
+        # Check concurrent job limit
+        active_jobs = sum(1 for j in jobs.values() if j["status"] in ("pending", "running"))
+        if active_jobs >= MAX_CONCURRENT_JOBS:
+            raise HTTPException(429, "Too many active jobs. Please wait.")
+
+        # Check total job limit
+        if len(jobs) >= MAX_JOBS:
+            await cleanup_old_jobs()
+            if len(jobs) >= MAX_JOBS:
+                raise HTTPException(429, "Job limit reached. Try again later.")
+
         jobs[job_id] = {
             "status": "pending",
             "progress": 0,
@@ -198,6 +243,7 @@ async def run_validation(request: Request, background_tasks: BackgroundTasks, us
             "capture_cart": capture_cart,
             "result_file": None,
             "error": None,
+            "created_at": datetime.now().isoformat(),
         }
 
     # Start background task
@@ -220,7 +266,7 @@ async def run_validation_task(job_id: str, selected_cities: list[str], capture_c
     try:
         # Parse selected cities (format: "PL:city" for pricing levels)
         locations: list[LocationConfig] = []
-        pricing_levels_config = load_pricing_levels()
+        pricing_levels_config = await load_pricing_levels()
 
         for city_key in selected_cities:
             pl_code, city_name = city_key.split(":", 1)
@@ -309,7 +355,7 @@ async def run_validation_task(job_id: str, selected_cities: list[str], capture_c
         await update_job(job_id, message=f"Collected {len(actual_prices)} prices. Comparing...", progress=80)
 
         # Load expected prices from master document or fallback to old format
-        master_path = get_current_master_path()
+        master_path = await get_current_master_path()
         expected_prices_list = None
         expected_df = None
 
@@ -498,8 +544,8 @@ async def upload_master(file: UploadFile = File(...), user: str = Depends(verify
 
     try:
         content = await file.read()
-        with open(file_path, "wb") as f:
-            f.write(content)
+        async with aiofiles.open(file_path, "wb") as f:
+            await f.write(content)
 
         # Parse the document to validate it
         parser = MasterDocumentParser(file_path)
@@ -515,7 +561,7 @@ async def upload_master(file: UploadFile = File(...), user: str = Depends(verify
             "by_category": summary["by_category"],
             "by_pl": summary["by_pl"],
         }
-        save_master_info(master_info)
+        await save_master_info(master_info)
 
         return {
             "success": True,
@@ -535,9 +581,9 @@ async def upload_master(file: UploadFile = File(...), user: str = Depends(verify
 
 
 @app.get("/master-info")
-async def master_info():
+async def master_info_endpoint():
     """Get info about the currently loaded master document."""
-    info = get_master_info()
+    info = await get_master_info()
     if not info:
         return {"loaded": False}
 
@@ -554,7 +600,7 @@ async def master_info():
 @app.get("/admin", response_class=HTMLResponse)
 async def admin_page(request: Request):
     """Render the admin page for managing cities."""
-    provinces = load_cities_from_config()
+    provinces = await load_cities_from_config()
     return templates.TemplateResponse(
         "admin.html",
         {
@@ -582,7 +628,7 @@ async def add_city(request: Request, user: str = Depends(verify_api_key)):
     if not city:
         return JSONResponse({"error": "City name is required"}, status_code=400)
 
-    provinces = load_cities_from_config()
+    provinces = await load_cities_from_config()
 
     # Initialize province if it doesn't exist
     if province not in provinces:
@@ -598,7 +644,7 @@ async def add_city(request: Request, user: str = Depends(verify_api_key)):
 
     # Add the city
     provinces[province].append({"city": city, "store_name": store_name})
-    save_cities_to_config(provinces)
+    await save_cities_to_config(provinces)
 
     return {"success": True, "message": f"Added {city} to {province}"}
 
@@ -607,7 +653,7 @@ async def add_city(request: Request, user: str = Depends(verify_api_key)):
 async def delete_city(province: str, city: str, user: str = Depends(verify_api_key)):
     """Remove a city from a province."""
     province = province.upper()
-    provinces = load_cities_from_config()
+    provinces = await load_cities_from_config()
 
     if province not in provinces:
         return JSONResponse({"error": f"Province '{province}' not found"}, status_code=404)
@@ -619,7 +665,7 @@ async def delete_city(province: str, city: str, user: str = Depends(verify_api_k
     if len(provinces[province]) == original_count:
         return JSONResponse({"error": f"City '{city}' not found in {province}"}, status_code=404)
 
-    save_cities_to_config(provinces)
+    await save_cities_to_config(provinces)
     return {"success": True, "message": f"Removed {city} from {province}"}
 
 
@@ -636,7 +682,7 @@ async def add_province(request: Request, user: str = Depends(verify_api_key)):
             status_code=400
         )
 
-    provinces = load_cities_from_config()
+    provinces = await load_cities_from_config()
 
     if province in provinces:
         return JSONResponse(
@@ -645,7 +691,7 @@ async def add_province(request: Request, user: str = Depends(verify_api_key)):
         )
 
     provinces[province] = []
-    save_cities_to_config(provinces)
+    await save_cities_to_config(provinces)
 
     return {"success": True, "message": f"Added province {province}"}
 
@@ -654,7 +700,7 @@ async def add_province(request: Request, user: str = Depends(verify_api_key)):
 async def delete_province(province: str, user: str = Depends(verify_api_key)):
     """Delete an empty province."""
     province = province.upper()
-    provinces = load_cities_from_config()
+    provinces = await load_cities_from_config()
 
     if province not in provinces:
         return JSONResponse({"error": f"Province '{province}' not found"}, status_code=404)
@@ -666,6 +712,6 @@ async def delete_province(province: str, user: str = Depends(verify_api_key)):
         )
 
     del provinces[province]
-    save_cities_to_config(provinces)
+    await save_cities_to_config(provinces)
 
     return {"success": True, "message": f"Removed province {province}"}

@@ -4,7 +4,10 @@ from decimal import Decimal
 from difflib import get_close_matches
 from typing import Optional
 
+import numpy as np
 import pandas as pd
+
+pd.options.mode.copy_on_write = True
 
 from .models import ValidationStatus, PriceRecord, PriceSource
 
@@ -215,10 +218,18 @@ def compare_prices(
         merged["actual_price"].astype(float) - merged["expected_price"].astype(float)
     ).round(2)
 
-    # Determine pass/fail using vectorized operation
-    merged["status"] = merged.apply(
-        lambda row: _determine_status(row, tolerance), axis=1
-    )
+    # Determine pass/fail using vectorized np.select
+    conditions = [
+        pd.isna(merged["expected_price"]),
+        pd.isna(merged["actual_price"]),
+        merged["price_difference"].abs() <= tolerance,
+    ]
+    choices = [
+        ValidationStatus.MISSING_EXPECTED,
+        ValidationStatus.MISSING_ACTUAL,
+        ValidationStatus.PASS,
+    ]
+    merged["status"] = np.select(conditions, choices, default=ValidationStatus.FAIL)
 
     # Generate summary with division-by-zero protection
     total_products = len(merged)
@@ -348,12 +359,11 @@ def calculate_summary_by_province(details_df: pd.DataFrame) -> pd.DataFrame:
         failed=("status", lambda x: (x == ValidationStatus.FAIL).sum()),
     ).reset_index()
 
-    # Calculate pass rate with division-by-zero protection
-    summary["pass_rate"] = summary.apply(
-        lambda row: f"{(row['passed'] / row['total_products'] * 100):.1f}%"
-        if row["total_products"] > 0
-        else "N/A",
-        axis=1,
+    # Calculate pass rate with division-by-zero protection using vectorized operation
+    summary["pass_rate"] = np.where(
+        summary["total_products"] > 0,
+        (summary["passed"] / summary["total_products"] * 100).round(1).astype(str) + "%",
+        "N/A",
     )
 
     return summary
