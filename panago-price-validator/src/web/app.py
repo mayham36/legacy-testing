@@ -235,6 +235,12 @@ async def run_validation(request: Request, background_tasks: BackgroundTasks, us
             if len(jobs) >= MAX_JOBS:
                 raise HTTPException(429, "Job limit reached. Try again later.")
 
+        # Group selected cities by pricing level for milestone tracking
+        pl_groups: dict[str, list[str]] = {}
+        for city_str in selected_cities:
+            pl_code = city_str.split(":")[0]
+            pl_groups.setdefault(pl_code, []).append(city_str)
+
         jobs[job_id] = {
             "status": "pending",
             "progress": 0,
@@ -247,6 +253,11 @@ async def run_validation(request: Request, background_tasks: BackgroundTasks, us
             "started_at": None,
             "ended_at": None,
             "elapsed_seconds": 0,
+            "pl_progress": {
+                pl: {"total": len(cities), "completed": 0, "succeeded": 0, "failed": 0}
+                for pl, cities in pl_groups.items()
+            },
+            "milestones": [],
         }
 
     # Start background task
@@ -335,6 +346,42 @@ async def run_validation_task(job_id: str, selected_cities: list[str], capture_c
             # Schedule the async update (fire-and-forget for progress updates)
             asyncio.create_task(update_progress_async(message))
 
+        # Build PL name mapping from config for milestone messages
+        pl_names: dict[str, str] = {}
+        for pl_code, pl_data in pricing_levels_config.items():
+            pl_names[pl_code] = pl_data.get("name", pl_code)
+
+        # Callback fired when each location finishes (success or failure)
+        def on_location_complete(location, success: bool, price_count: int):
+            async def _handle():
+                pl_code = str(location.get_pricing_level())
+                async with jobs_lock:
+                    job = jobs.get(job_id)
+                    if not job:
+                        return
+                    pl = job["pl_progress"].get(pl_code)
+                    if not pl:
+                        return
+                    pl["completed"] += 1
+                    if success:
+                        pl["succeeded"] += 1
+                    else:
+                        pl["failed"] += 1
+
+                    # Check if this pricing level is now complete
+                    if pl["completed"] == pl["total"]:
+                        milestone = {
+                            "type": "pl_complete",
+                            "pl_code": pl_code,
+                            "pl_name": pl_names.get(pl_code, pl_code),
+                            "cities_succeeded": pl["succeeded"],
+                            "cities_failed": pl["failed"],
+                            "cities_total": pl["total"],
+                            "timestamp": datetime.now().isoformat(),
+                        }
+                        job["milestones"].append(milestone)
+            asyncio.create_task(_handle())
+
         # Create automation instance
         automation = PanagoAutomation(
             config,
@@ -344,6 +391,7 @@ async def run_validation_task(job_id: str, selected_cities: list[str], capture_c
             max_delay_ms=max_delay,
             capture_cart_prices=capture_cart,
             progress_callback=update_progress,
+            on_location_complete=on_location_complete,
         )
 
         # Override locations with selected ones
@@ -458,21 +506,30 @@ async def get_status(job_id: str):
 
 @app.get("/stream/{job_id}")
 async def stream_status(job_id: str):
-    """SSE endpoint for real-time progress updates."""
+    """SSE endpoint for real-time progress updates and milestone events."""
     async def event_generator():
+        last_milestone_idx = 0
+
         while True:
             async with jobs_lock:
                 if job_id not in jobs:
                     yield f"data: {{'error': 'Job not found'}}\n\n"
                     break
                 job = jobs[job_id].copy()
+                milestones = list(job.get("milestones", []))
 
             # Calculate elapsed time dynamically for running jobs
             if job["status"] == "running" and job.get("started_at"):
                 started = datetime.fromisoformat(job["started_at"])
                 job["elapsed_seconds"] = (datetime.now() - started).total_seconds()
 
+            # Send progress update (existing behavior)
             yield f"data: {json.dumps(job)}\n\n"
+
+            # Send any new milestone events as named SSE events
+            for ms in milestones[last_milestone_idx:]:
+                yield f"event: milestone\ndata: {json.dumps(ms)}\n\n"
+            last_milestone_idx = len(milestones)
 
             if job["status"] in ("completed", "error"):
                 break

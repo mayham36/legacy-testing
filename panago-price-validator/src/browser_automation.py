@@ -141,6 +141,7 @@ class PanagoAutomation:
         max_delay_ms: int = 6000,
         capture_cart_prices: bool = False,
         progress_callback: Optional[Callable[[str], None]] = None,
+        on_location_complete: Optional[Callable[["LocationConfig", bool, int], None]] = None,
     ) -> None:
         """Initialize the automation engine.
 
@@ -152,6 +153,8 @@ class PanagoAutomation:
             max_delay_ms: Maximum delay between actions in milliseconds.
             capture_cart_prices: If True, also capture prices from cart (slower).
             progress_callback: Optional callback function to report progress messages.
+            on_location_complete: Optional callback when a location finishes.
+                Called with (location, success, price_count).
         """
         self.config = config
         self.base_url = base_url
@@ -159,6 +162,7 @@ class PanagoAutomation:
         self.max_delay_ms = max_delay_ms
         self.capture_cart_prices = capture_cart_prices
         self.progress_callback = progress_callback
+        self.on_location_complete = on_location_complete
         self._semaphore: Optional[asyncio.Semaphore] = None
         self._locations_path = locations_path
         self._locations: list[LocationConfig] = []
@@ -635,12 +639,23 @@ class PanagoAutomation:
         """
         async with self._semaphore:
             context = await self._create_optimized_context(browser)
+            success = False
+            prices = []
 
             try:
                 page = await context.new_page()
-                return await self._collect_prices(page, location)
+                prices = await self._collect_prices(page, location)
+                success = True
+                return prices
+            except Exception:
+                raise
             finally:
                 await context.close()
+                if self.on_location_complete:
+                    try:
+                        self.on_location_complete(location, success, len(prices))
+                    except Exception as cb_err:
+                        logger.warning("on_location_complete_failed", error=str(cb_err))
 
     async def _create_optimized_context(self, browser: Browser) -> BrowserContext:
         """Create browser context with resource blocking.

@@ -158,9 +158,13 @@
         </div>
     </div>
 
+    <!-- Toast Container for milestone notifications -->
+    <div id="toastContainer" class="toast-container"></div>
+
     <script>
         let currentJobId = null;
         let eventSource = null;
+        let seenMilestones = 0;
 
         function updateCount() {
             const checked = document.querySelectorAll('input[name="cities"]:checked').length;
@@ -176,6 +180,59 @@
             document.querySelectorAll('input[name="cities"]').forEach(cb => cb.checked = false);
             updateCount();
         }
+
+        // --- Milestone Notification System ---
+
+        const TOAST_MAX = 3;
+        const TOAST_DURATION = 5000;
+
+        async function requestNotificationPermission() {
+            if ('Notification' in window && Notification.permission === 'default') {
+                await Notification.requestPermission();
+            }
+        }
+
+        function showMilestoneToast(milestone) {
+            const container = document.getElementById('toastContainer');
+            const toast = document.createElement('div');
+            toast.className = 'toast toast-success';
+
+            const failText = milestone.cities_failed > 0
+                ? ' (' + milestone.cities_failed + ' failed)' : '';
+            toast.innerHTML =
+                '<span class="material-icons toast-icon">check_circle</span>' +
+                '<span>' + milestone.pl_code + ' Complete &mdash; ' + milestone.pl_name +
+                ': ' + milestone.cities_succeeded + '/' + milestone.cities_total +
+                ' cities' + failText + '</span>';
+
+            container.appendChild(toast);
+
+            // Enforce max visible toasts
+            while (container.children.length > TOAST_MAX) {
+                container.removeChild(container.firstChild);
+            }
+
+            setTimeout(function() { toast.remove(); }, TOAST_DURATION);
+        }
+
+        function notifyMilestone(milestone) {
+            var isHidden = document.visibilityState === 'hidden';
+
+            if (isHidden && 'Notification' in window && Notification.permission === 'granted') {
+                var failText = milestone.cities_failed > 0
+                    ? ' (' + milestone.cities_failed + ' failed)' : '';
+                var n = new Notification(milestone.pl_code + ' Complete', {
+                    body: milestone.pl_name + ' \u2014 ' + milestone.cities_succeeded +
+                          '/' + milestone.cities_total + ' cities validated' + failText,
+                    tag: 'panago-pl-' + milestone.pl_code,
+                });
+                n.onclick = function() { window.focus(); n.close(); };
+            } else {
+                showMilestoneToast(milestone);
+            }
+        }
+
+        // --- End Milestone Notification System ---
 
         async function uploadMaster(input) {
             if (!input.files || input.files.length === 0) return;
@@ -222,6 +279,12 @@
                 return;
             }
 
+            // Request notification permission before starting
+            await requestNotificationPermission();
+
+            // Reset milestone tracking
+            seenMilestones = 0;
+
             // Hide form, show progress
             document.getElementById('validationForm').classList.add('hidden');
             document.querySelector('.controls').classList.add('hidden');
@@ -252,6 +315,7 @@
         function startPolling(jobId) {
             // Use SSE for real-time updates
             eventSource = new EventSource('/stream/' + jobId);
+            var jobCompleted = false;
 
             eventSource.onmessage = function(event) {
                 const data = JSON.parse(event.data);
@@ -265,6 +329,7 @@
                 updateProgress(data);
 
                 if (data.status === 'completed') {
+                    jobCompleted = true;
                     eventSource.close();
                     showResults(data);
                 } else if (data.status === 'error') {
@@ -273,9 +338,17 @@
                 }
             };
 
+            // Listen for milestone events (named SSE events)
+            eventSource.addEventListener('milestone', function(event) {
+                // Suppress milestone if job already completed (avoids redundant notification)
+                if (jobCompleted) return;
+                var milestone = JSON.parse(event.data);
+                notifyMilestone(milestone);
+            });
+
             eventSource.onerror = function() {
                 eventSource.close();
-                // Fallback to polling
+                // Fallback to polling (milestones available via job state)
                 pollStatus(jobId);
             };
         }
@@ -292,13 +365,23 @@
 
                 updateProgress(data);
 
+                // Deliver any milestones missed during SSE disconnect
+                var milestones = data.milestones || [];
+                // Don't deliver milestones if job is already completed (suppresses final PL)
+                if (data.status !== 'completed') {
+                    for (var i = seenMilestones; i < milestones.length; i++) {
+                        notifyMilestone(milestones[i]);
+                    }
+                }
+                seenMilestones = milestones.length;
+
                 if (data.status === 'completed') {
                     showResults(data);
                 } else if (data.status === 'error') {
                     showError(data.message);
                 } else {
                     // Continue polling
-                    setTimeout(() => pollStatus(jobId), 2000);
+                    setTimeout(function() { pollStatus(jobId); }, 2000);
                 }
             } catch (error) {
                 showError('Failed to check status: ' + error.message);
