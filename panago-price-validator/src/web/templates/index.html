@@ -165,6 +165,7 @@
         let currentJobId = null;
         let eventSource = null;
         let seenMilestones = 0;
+        let totalPLs = 0;
 
         function updateCount() {
             const checked = document.querySelectorAll('input[name="cities"]:checked').length;
@@ -182,6 +183,7 @@
         }
 
         // --- Milestone Notification System ---
+        console.log('[Panago] Milestone notification system loaded');
 
         const TOAST_MAX = 3;
         const TOAST_DURATION = 5000;
@@ -219,6 +221,7 @@
             var isHidden = document.visibilityState === 'hidden';
 
             if (isHidden && 'Notification' in window && Notification.permission === 'granted') {
+                // Always send native notifications for backgrounded tabs
                 var failText = milestone.cities_failed > 0
                     ? ' (' + milestone.cities_failed + ' failed)' : '';
                 var n = new Notification(milestone.pl_code + ' Complete', {
@@ -227,7 +230,10 @@
                     tag: 'panago-pl-' + milestone.pl_code,
                 });
                 n.onclick = function() { window.focus(); n.close(); };
-            } else {
+            } else if (totalPLs > 1) {
+                // Only show in-page toasts when multiple PLs are selected,
+                // otherwise the toast appears simultaneously with the success
+                // screen and feels redundant
                 showMilestoneToast(milestone);
             }
         }
@@ -285,6 +291,11 @@
             // Reset milestone tracking
             seenMilestones = 0;
 
+            // Count distinct PLs selected -- skip milestone toasts if only 1 PL
+            var plSet = {};
+            cities.forEach(function(c) { plSet[c.split(':')[0]] = true; });
+            totalPLs = Object.keys(plSet).length;
+
             // Hide form, show progress
             document.getElementById('validationForm').classList.add('hidden');
             document.querySelector('.controls').classList.add('hidden');
@@ -339,10 +350,11 @@
             };
 
             // Listen for milestone events (named SSE events)
+            // Milestones are sent before the data event, so they arrive
+            // before the completed status closes the EventSource
             eventSource.addEventListener('milestone', function(event) {
-                // Suppress milestone if job already completed (avoids redundant notification)
-                if (jobCompleted) return;
                 var milestone = JSON.parse(event.data);
+                console.log('[Panago] Milestone received:', milestone);
                 notifyMilestone(milestone);
             });
 
@@ -367,11 +379,8 @@
 
                 // Deliver any milestones missed during SSE disconnect
                 var milestones = data.milestones || [];
-                // Don't deliver milestones if job is already completed (suppresses final PL)
-                if (data.status !== 'completed') {
-                    for (var i = seenMilestones; i < milestones.length; i++) {
-                        notifyMilestone(milestones[i]);
-                    }
+                for (var i = seenMilestones; i < milestones.length; i++) {
+                    notifyMilestone(milestones[i]);
                 }
                 seenMilestones = milestones.length;
 

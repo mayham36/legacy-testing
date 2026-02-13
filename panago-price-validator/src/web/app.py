@@ -495,6 +495,22 @@ async def run_validation_task(job_id: str, selected_cities: list[str], capture_c
         await update_job(job_id, status="error", message=f"Error: {str(e)}", error=str(e))
 
 
+@app.get("/debug/jobs")
+async def debug_jobs():
+    """Debug endpoint: list all jobs with milestone info."""
+    async with jobs_lock:
+        summary = {}
+        for jid, job in jobs.items():
+            summary[jid] = {
+                "status": job["status"],
+                "cities": job.get("cities", []),
+                "pl_progress": job.get("pl_progress", {}),
+                "milestones": job.get("milestones", []),
+                "message": job.get("message", ""),
+            }
+        return summary
+
+
 @app.get("/status/{job_id}")
 async def get_status(job_id: str):
     """Get the status of a validation job."""
@@ -523,13 +539,15 @@ async def stream_status(job_id: str):
                 started = datetime.fromisoformat(job["started_at"])
                 job["elapsed_seconds"] = (datetime.now() - started).total_seconds()
 
-            # Send progress update (existing behavior)
-            yield f"data: {json.dumps(job)}\n\n"
-
-            # Send any new milestone events as named SSE events
+            # Send milestone events BEFORE the data event so the frontend
+            # processes milestones before seeing status=completed (which
+            # closes the EventSource)
             for ms in milestones[last_milestone_idx:]:
                 yield f"event: milestone\ndata: {json.dumps(ms)}\n\n"
             last_milestone_idx = len(milestones)
+
+            # Send progress update (existing behavior)
+            yield f"data: {json.dumps(job)}\n\n"
 
             if job["status"] in ("completed", "error"):
                 break
